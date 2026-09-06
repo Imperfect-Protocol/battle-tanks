@@ -7,7 +7,7 @@ import { useGameRoom } from "../hooks/useGameRoom";
 
 const GAME_TICK_MS = 40;
 const GAME_OVER_DELAY_MS = 5000;
-const HELP_TEXT = "COMMANDS: forward <points>, backward <points>, left <degrees>, right <degrees>, turret <degrees>, fire <power> <angle>, lock, unlock, wait";
+const HELP_TEXT = "COMMANDS: forward <points>, backward <points>, turn <degrees>, aim <degrees> <elevation>, fire <power>, lock, unlock, wait";
 
 export function BattlePage() {
   const navigate = useNavigate();
@@ -210,15 +210,31 @@ function statusLabel(status: string | undefined, ready: boolean) {
 }
 
 function describeCommand(command: string) {
+  const commands = command
+    .split(/[;,\n]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (commands.length > 1) {
+    return commands.map(describeSingleCommand).join("\n");
+  }
+
+  return describeSingleCommand(command);
+}
+
+function describeSingleCommand(command: string) {
   const [action, rawAmount, rawSecondAmount] = command.trim().toLowerCase().replace(/\s+/g, " ").split(" ");
   const amount = Number(rawAmount);
 
-  if (action === "turret" && Number.isFinite(amount)) {
-    return `Turret ${Math.abs(amount)} degrees ${amount < 0 ? "left" : "right"}`;
+  if (action === "aim" && Number.isFinite(amount)) {
+    const elevation = Number(rawSecondAmount);
+    if (Number.isFinite(elevation)) {
+      return `Aim ${Math.abs(amount)} degrees ${amount < 0 ? "left" : "right"} at ${elevation} degrees elevation`;
+    }
   }
 
-  if ((action === "left" || action === "right") && Number.isFinite(amount)) {
-    return `Hull ${amount} degrees ${action}`;
+  if (action === "turn" && Number.isFinite(amount)) {
+    return `Turn ${Math.abs(amount)} degrees ${amount < 0 ? "left" : "right"}`;
   }
 
   if ((action === "forward" || action === "backward") && Number.isFinite(amount)) {
@@ -227,9 +243,8 @@ function describeCommand(command: string) {
 
   if (action === "fire") {
     const power = Number(rawAmount);
-    const angle = Number(rawSecondAmount);
-    if (Number.isFinite(power) && Number.isFinite(angle)) {
-      return `Fire ${power}% power at ${angle} degrees`;
+    if (Number.isFinite(power)) {
+      return `Fire ${power}% power`;
     }
   }
 

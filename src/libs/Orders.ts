@@ -1,12 +1,12 @@
 export type Command =
-  | `forward ${number}`
-  | `backward ${number}`
-  | `left ${number}`
-  | `right ${number}`
-  | `turret ${number}`
+  | `run ${number}`
+  | `turn ${number}`
+  | `aim ${number} ${number}`
   | `hull-step ${number}`
   | `turret-step ${number}`
-  | `fire ${number} ${number}`
+  | `aim-angle ${number}`
+  | `fire ${number}`
+  | "stop"
   | "lock"
   | "unlock"
   | "wait";
@@ -28,7 +28,7 @@ export class Orders {
     const commands: Command[] = [];
     const invalidCommands: string[] = [];
 
-    for (const command of script.split(/[\n,]+/)) {
+    for (const command of script.split(/[\n,;]+/)) {
       const normalized = command.trim();
       if (!normalized) {
         continue;
@@ -58,38 +58,51 @@ function normalizeCommand(command: string): Command[] | null {
     return rawAmount === undefined ? ["wait"] : null;
   }
 
+  if (action === "stop") {
+    return rawAmount === undefined ? ["stop"] : null;
+  }
+
   if (action === "lock" || action === "unlock") {
     return rawAmount === undefined ? [action] : null;
   }
 
-  if (action === "forward" || action === "backward") {
-    const amount = boundedAmount(rawAmount, 0, 120);
-    return amount === null ? null : repeatCommand(`${action} 1`, amount);
+  if (action === "run") {
+    const speed = boundedNumber(rawAmount, 0, 30);
+    return speed === null ? null : [`run ${roundForStorage(speed)}`];
   }
 
   if (action === "fire") {
+    if (rawSecondAmount !== undefined) {
+      return null;
+    }
     const power = boundedNumber(rawAmount, 10, 100);
-    const angle = boundedNumber(rawSecondAmount, 30, 60);
-    if (power === null || angle === null) {
+    if (power === null) {
       return null;
     }
 
-    return [`fire ${roundForStorage(power)} ${roundForStorage(angle)}`];
+    return [`fire ${roundForStorage(power)}`];
   }
 
-  if (action === "left" || action === "right") {
-    const amount = boundedNumber(rawAmount, 0, 360);
+  if (action === "turn") {
+    const amount = boundedNumber(rawAmount, -360, 360);
     if (amount === null) {
       return null;
     }
 
-    const sign = action === "right" ? 1 : -1;
-    return expandRotationCommand("hull-step", sign * amount);
+    return expandRotationCommand("hull-step", amount);
   }
 
-  if (action === "turret") {
-    const amount = boundedNumber(rawAmount, -360, 360);
-    return amount === null ? null : expandRotationCommand("turret-step", amount);
+  if (action === "aim") {
+    const horizontal = boundedNumber(rawAmount, -360, 360);
+    const vertical = boundedNumber(rawSecondAmount, 30, 60);
+    if (horizontal === null || vertical === null) {
+      return null;
+    }
+
+    return [
+      ...expandRotationCommand("turret-step", horizontal),
+      `aim-angle ${roundForStorage(vertical)}` as Command,
+    ];
   }
 
   return null;

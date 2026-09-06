@@ -5,9 +5,7 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 const BOARD_SIZE = 12;
 const DEFAULT_LOBBY_ID = "pvp";
 const MAX_HEALTH = 100;
-const COMMAND_POINTS_PER_SQUARE = 10;
 const UNITS_PER_SQUARE = 1000;
-const UNITS_PER_COMMAND_POINT = UNITS_PER_SQUARE / COMMAND_POINTS_PER_SQUARE;
 const TANK_LENGTH_UNITS = UNITS_PER_SQUARE * 1.18;
 const TANK_WIDTH_UNITS = UNITS_PER_SQUARE * 0.62;
 const TANK_COLLISION_RADIUS_UNITS = Math.hypot(TANK_LENGTH_UNITS / 2, TANK_WIDTH_UNITS / 2);
@@ -17,16 +15,16 @@ const EXPLOSION_DURATION_MS = 360;
 const MIN_TICK_INTERVAL_MS = 35;
 const FRAME_RATE = 25;
 const ROTATION_DEGREES_PER_TICK = 360 / (3 * FRAME_RATE);
-const DEFAULT_MOVE_POINTS = 10;
-const DEFAULT_TURN_DEGREES = 90;
 const DEFAULT_FIRE_ANGLE_DEGREES = 45;
 const DEFAULT_FIRE_POWER = 100;
 const MIN_FIRE_POWER = 10;
 const MAX_FIRE_POWER = 100;
-const MAX_COMMAND_POINTS = BOARD_SIZE * COMMAND_POINTS_PER_SQUARE;
+const MAX_RUN_SPEED = 30;
 const MAX_COMMAND_DEGREES = 360;
 const MAX_PROJECTILE_DAMAGE = 35;
 const MIN_PROJECTILE_DAMAGE = 4;
+const COLLISION_DAMAGE_PER_SPEED = 0.45;
+const MAX_COLLISION_DAMAGE = 45;
 const NORMAL_IQR_WIDTH_IN_SIGMA = 1.3489795003921634;
 const PROJECTILE_DAMAGE_SIGMA = PROJECTILE_HIT_RADIUS_UNITS / NORMAL_IQR_WIDTH_IN_SIGMA;
 const LEGACY_DIRECTION_DEGREES = {
@@ -53,12 +51,13 @@ const TURRET_SIZES = [0.76, 0.84, 0.92, 1, 1.06];
 
 type StoredCommand =
   | { action: "wait"; amount: 0 }
-  | { action: "lock" | "unlock"; amount: 0 }
+  | { action: "stop" | "lock" | "unlock"; amount: 0 }
   | {
-      action: "forward" | "backward" | "left" | "right" | "turret" | "hull-step" | "turret-step";
-      amount: number;
-    }
-  | { action: "fire"; power: number; angle: number };
+    action: "run" | "turn" | "hull-step" | "turret-step" | "aim-angle";
+    amount: number;
+  }
+  | { action: "aim"; horizontal: number; vertical: number }
+  | { action: "fire"; power: number };
 
 export const getRoom = query({
   args: { roomCode: v.string() },
@@ -204,11 +203,13 @@ export const createRoom = mutation({
       playerId,
       position: spawnPoint(0),
       velocity: { x: 0, y: 0 },
+      speed: 0,
       hullDirection: 0,
       turretDirection: 0,
       turretLocked: true,
       tankSpec: commander.tankSpec,
       ammoType: "missile",
+      launchAngle: DEFAULT_FIRE_ANGLE_DEGREES,
       health: MAX_HEALTH,
       updatedAt: now,
     });
@@ -262,11 +263,13 @@ export const joinRoom = mutation({
       playerId,
       position: slot === "alpha" ? spawnPoint(0) : spawnPoint(1),
       velocity: { x: 0, y: 0 },
+      speed: 0,
       hullDirection: slot === "alpha" ? 0 : 180,
       turretDirection: slot === "alpha" ? 0 : 180,
       turretLocked: true,
       tankSpec: commander.tankSpec,
       ammoType: "missile",
+      launchAngle: DEFAULT_FIRE_ANGLE_DEGREES,
       health: MAX_HEALTH,
       updatedAt: now,
     });
@@ -378,12 +381,18 @@ export const runNextTick = mutation({
       .withIndex("by_match", (q) => q.eq("matchId", match._id))
       .collect();
 
+    let wasDestroyedByCollision = false;
     for (const tank of tanks) {
       const order = orders.find(
         (candidate) => candidate.tankId === tank._id && candidate.status !== "complete",
       );
       const command = order ? order.commands[order.cursor] : undefined;
-      await applyCommand(ctx, board, tanks, tank, command, now);
+      const tankBeforeCommand = await ctx.db.get(tank._id);
+      if (!tankBeforeCommand) {
+        continue;
+      }
+
+      await applyCommand(ctx, board, tankBeforeCommand, command, now);
 
       if (order) {
         const cursor = order.cursor + 1;
@@ -393,12 +402,23 @@ export const runNextTick = mutation({
           updatedAt: now,
         });
       }
+
+      const tankAfterCommand = await ctx.db.get(tank._id);
+      if (!tankAfterCommand) {
+        continue;
+      }
+
+      const latestTanks = await ctx.db
+        .query("tanks")
+        .withIndex("by_match", (q) => q.eq("matchId", match._id))
+        .collect();
+      wasDestroyedByCollision = (await advanceTankMotion(ctx, board, latestTanks, tankAfterCommand, now)) || wasDestroyedByCollision;
     }
 
     const wasAlreadyDestroyed = tanks.some((tank) => tank.health <= 0);
     const wasDestroyedThisTick = await advanceProjectiles(ctx, match._id, board.size, now);
     await ctx.db.patch(match._id, {
-      status: wasAlreadyDestroyed || wasDestroyedThisTick ? "finished" : match.status,
+      status: wasAlreadyDestroyed || wasDestroyedByCollision || wasDestroyedThisTick ? "finished" : match.status,
       currentTick: match.currentTick + 1,
       lastTickAt: now,
       updatedAt: now,
@@ -458,7 +478,7 @@ async function requireCommanderProfile(ctx: any, commanderId: any) {
   };
 }
 
-async function applyCommand(ctx: any, board: any, tanks: any[], tank: any, command: string | undefined, now: number) {
+async function applyCommand(ctx: any, board: any, tank: any, command: string | undefined, now: number) {
   if (tank.health <= 0 || !command) {
     return;
   }
@@ -481,9 +501,30 @@ async function applyCommand(ctx: any, board: any, tanks: any[], tank: any, comma
     return;
   }
 
-  if (parsed.action === "left" || parsed.action === "right") {
-    const direction = parsed.action === "right" ? 1 : -1;
-    await patchHullRotation(ctx, tank, direction * parsed.amount, now);
+  if (parsed.action === "aim-angle") {
+    await ctx.db.patch(tank._id, {
+      launchAngle: parsed.amount,
+      updatedAt: now,
+    });
+    return;
+  }
+
+  if (parsed.action === "run") {
+    const velocity = vectorFromDegrees(angleFromDirection(tank.hullDirection), speedToUnitsPerTick(parsed.amount));
+    await ctx.db.patch(tank._id, {
+      speed: parsed.amount,
+      velocity,
+      updatedAt: now,
+    });
+    return;
+  }
+
+  if (parsed.action === "stop") {
+    await ctx.db.patch(tank._id, {
+      speed: 0,
+      velocity: { x: 0, y: 0 },
+      updatedAt: now,
+    });
     return;
   }
 
@@ -495,16 +536,13 @@ async function applyCommand(ctx: any, board: any, tanks: any[], tank: any, comma
     return;
   }
 
-  if (parsed.action === "turret") {
-    await ctx.db.patch(tank._id, {
-      turretDirection: normalizeDegrees(angleFromDirection(tank.turretDirection) + parsed.amount),
-      updatedAt: now,
-    });
+  if (parsed.action === "turn") {
+    await patchHullRotation(ctx, tank, parsed.amount, now);
     return;
   }
 
   if (parsed.action === "fire") {
-    const launch = launchVelocity(parsed.power, parsed.angle);
+    const launch = launchVelocity(parsed.power, tank.launchAngle ?? DEFAULT_FIRE_ANGLE_DEGREES);
     const velocity = vectorFromDegrees(angleFromDirection(tank.turretDirection), launch.horizontal);
     const tankSpec = normalizeTankSpec(tank.tankSpec);
     const mountOffset = vectorFromDegrees(
@@ -528,7 +566,7 @@ async function applyCommand(ctx: any, board: any, tanks: any[], tank: any, comma
       height: 0,
       verticalVelocity: launch.vertical,
       launchPower: parsed.power,
-      launchAngle: parsed.angle,
+      launchAngle: tank.launchAngle ?? DEFAULT_FIRE_ANGLE_DEGREES,
       status: "active",
       createdAt: now,
       updatedAt: now,
@@ -536,24 +574,7 @@ async function applyCommand(ctx: any, board: any, tanks: any[], tank: any, comma
     return;
   }
 
-  if (parsed.action === "forward" || parsed.action === "backward") {
-    const direction = parsed.action === "forward" ? 1 : -1;
-    const velocity = vectorFromDegrees(
-      angleFromDirection(tank.hullDirection),
-      direction * commandPointsToUnits(parsed.amount),
-    );
-    const position = {
-      x: tank.position.x + velocity.x,
-      y: tank.position.y + velocity.y,
-    };
-    const nextPosition = resolveTankMove(position, board, tanks, tank);
-    const moved = distanceBetween(nextPosition, tank.position) > 0.001;
-    await ctx.db.patch(tank._id, {
-      position: nextPosition,
-      velocity: moved ? velocity : { x: 0, y: 0 },
-      updatedAt: now,
-    });
-  }
+  return;
 }
 
 async function advanceProjectiles(ctx: any, matchId: any, boardSize: number, now: number) {
@@ -612,6 +633,57 @@ async function advanceProjectiles(ctx: any, matchId: any, boardSize: number, now
   return destroyedTank;
 }
 
+async function advanceTankMotion(ctx: any, board: any, tanks: any[], tank: any, now: number) {
+  if (tank.health <= 0) {
+    return false;
+  }
+
+  const speed = clampFinite(tank.speed, 0, MAX_RUN_SPEED, 0);
+  if (speed <= 0) {
+    return false;
+  }
+
+  const velocity = vectorFromDegrees(angleFromDirection(tank.hullDirection), speedToUnitsPerTick(speed));
+  const desiredPosition = {
+    x: tank.position.x + velocity.x,
+    y: tank.position.y + velocity.y,
+  };
+  const move = resolveTankMove(desiredPosition, board, tanks, tank);
+
+  if (!move.wallHit && !move.tankHit) {
+    await ctx.db.patch(tank._id, {
+      position: move.position,
+      velocity,
+      updatedAt: now,
+    });
+    return false;
+  }
+
+  const damage = collisionDamageForSpeed(speed);
+  const movingHealth = Math.max(0, tank.health - damage);
+  await ctx.db.patch(tank._id, {
+    position: tank.position,
+    velocity: { x: 0, y: 0 },
+    speed: 0,
+    health: movingHealth,
+    updatedAt: now,
+  });
+
+  let hitTankDestroyed = false;
+  if (move.tankHit) {
+    const hitHealth = Math.max(0, move.tankHit.health - damage);
+    hitTankDestroyed = hitHealth <= 0;
+    await ctx.db.patch(move.tankHit._id, {
+      velocity: { x: 0, y: 0 },
+      speed: 0,
+      health: hitHealth,
+      updatedAt: now,
+    });
+  }
+
+  return movingHealth <= 0 || hitTankDestroyed;
+}
+
 function normalizeRoom(roomCode: string) {
   return roomCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8) || "WWEFFP";
 }
@@ -624,7 +696,11 @@ function cleanBattleName(name: string | undefined) {
   return name?.trim().slice(0, 48) || "Battle";
 }
 
-function normalizeOrderCommand(command: string) {
+function normalizeOrderCommand(command: string): string[] {
+  if (/[;,\n]/.test(command)) {
+    return command.split(/[;,\n]+/).flatMap(normalizeOrderCommand);
+  }
+
   const normalized = command.trim().toLowerCase().replace(/\s+/g, " ");
   const parsed = parseStoredCommand(normalized);
   if (!parsed) {
@@ -633,61 +709,59 @@ function normalizeOrderCommand(command: string) {
   if (parsed.action === "wait") {
     return ["wait"];
   }
-  if (parsed.action === "lock" || parsed.action === "unlock") {
+  if (parsed.action === "stop" || parsed.action === "lock" || parsed.action === "unlock") {
     return [parsed.action];
   }
-  if (parsed.action === "forward" || parsed.action === "backward") {
-    return repeatCommand(`${parsed.action} 1`, parsed.amount);
+  if (parsed.action === "run") {
+    return [`run ${roundForStorage(parsed.amount)}`];
   }
-  if (parsed.action === "left") {
-    return expandRotationCommand("hull-step", -parsed.amount);
-  }
-  if (parsed.action === "right") {
+  if (parsed.action === "turn") {
     return expandRotationCommand("hull-step", parsed.amount);
   }
-  if (parsed.action === "turret") {
-    return expandRotationCommand("turret-step", parsed.amount);
+  if (parsed.action === "aim") {
+    return [
+      ...expandRotationCommand("turret-step", parsed.horizontal),
+      `aim-angle ${roundForStorage(parsed.vertical)}`,
+    ];
   }
-  if (parsed.action === "hull-step" || parsed.action === "turret-step") {
+  if (parsed.action === "hull-step" || parsed.action === "turret-step" || parsed.action === "aim-angle") {
     return [`${parsed.action} ${roundForStorage(parsed.amount)}`];
   }
   if (parsed.action === "fire") {
-    return [`fire ${parsed.power} ${parsed.angle}`];
+    return [`fire ${parsed.power}`];
   }
   return [];
 }
 
 function parseStoredCommand(command: string): StoredCommand | null {
-  const [action, rawAmount, rawSecondAmount] = command.trim().toLowerCase().replace(/\s+/g, " ").split(" ");
+  const [action, rawAmount, rawSecondAmount, extra] = command.trim().toLowerCase().replace(/\s+/g, " ").split(" ");
+  if (extra !== undefined) {
+    return null;
+  }
+
   if (action === "wait") {
-    return { action, amount: 0 };
+    return rawAmount === undefined ? { action, amount: 0 } : null;
   }
 
-  if (action === "lock" || action === "unlock") {
-    return { action, amount: 0 };
+  if (action === "stop" || action === "lock" || action === "unlock") {
+    return rawAmount === undefined ? { action, amount: 0 } : null;
   }
 
-  if (action === "forward") {
-    return { action, amount: boundedAmount(rawAmount, DEFAULT_MOVE_POINTS, 0, MAX_COMMAND_POINTS) };
-  }
-
-  if (action === "backward") {
-    return { action, amount: boundedAmount(rawAmount, DEFAULT_MOVE_POINTS, 0, MAX_COMMAND_POINTS) };
+  if (action === "run") {
+    if (rawAmount === undefined) {
+      return null;
+    }
+    return { action, amount: roundForStorage(boundedNumber(rawAmount, 0, 0, MAX_RUN_SPEED)) };
   }
 
   if (action === "fire") {
-    if (rawSecondAmount === undefined) {
-      return {
-        action,
-        power: DEFAULT_FIRE_POWER,
-        angle: roundForStorage(boundedNumber(rawAmount, DEFAULT_FIRE_ANGLE_DEGREES, 30, 60)),
-      };
+    if (rawAmount === undefined || rawSecondAmount !== undefined) {
+      return null;
     }
 
     return {
       action,
       power: roundForStorage(boundedNumber(rawAmount, DEFAULT_FIRE_POWER, MIN_FIRE_POWER, MAX_FIRE_POWER)),
-      angle: roundForStorage(boundedNumber(rawSecondAmount, DEFAULT_FIRE_ANGLE_DEGREES, 30, 60)),
     };
   }
 
@@ -698,17 +772,37 @@ function parseStoredCommand(command: string): StoredCommand | null {
     };
   }
 
-  if (action === "left" || action === "right") {
+  if (action === "aim-angle") {
+    if (rawAmount === undefined) {
+      return null;
+    }
+
     return {
       action,
-      amount: roundForStorage(boundedNumber(rawAmount, DEFAULT_TURN_DEGREES, 0, MAX_COMMAND_DEGREES)),
+      amount: roundForStorage(boundedNumber(rawAmount, DEFAULT_FIRE_ANGLE_DEGREES, 30, 60)),
     };
   }
 
-  if (action === "turret") {
+  if (action === "turn") {
+    if (rawAmount === undefined) {
+      return null;
+    }
+
     return {
       action,
       amount: roundForStorage(boundedNumber(rawAmount, 0, -MAX_COMMAND_DEGREES, MAX_COMMAND_DEGREES)),
+    };
+  }
+
+  if (action === "aim") {
+    if (rawAmount === undefined || rawSecondAmount === undefined) {
+      return null;
+    }
+
+    return {
+      action,
+      horizontal: roundForStorage(boundedNumber(rawAmount, 0, -MAX_COMMAND_DEGREES, MAX_COMMAND_DEGREES)),
+      vertical: roundForStorage(boundedNumber(rawSecondAmount, DEFAULT_FIRE_ANGLE_DEGREES, 30, 60)),
     };
   }
 
@@ -750,14 +844,14 @@ async function patchHullRotation(ctx: any, tank: any, delta: number, now: number
   const hullDirection = normalizeDegrees(angleFromDirection(tank.hullDirection) + delta);
   const patch = tank.turretLocked
     ? {
-        hullDirection,
-        turretDirection: normalizeDegrees(angleFromDirection(tank.turretDirection) + delta),
-        updatedAt: now,
-      }
+      hullDirection,
+      turretDirection: normalizeDegrees(angleFromDirection(tank.turretDirection) + delta),
+      updatedAt: now,
+    }
     : {
-        hullDirection,
-        updatedAt: now,
-      };
+      hullDirection,
+      updatedAt: now,
+    };
 
   await ctx.db.patch(tank._id, patch);
 }
@@ -817,11 +911,21 @@ function clampPosition(position: { x: number; y: number }, boardSize: number) {
 
 function resolveTankMove(position: { x: number; y: number }, board: any, tanks: any[], movingTank: any) {
   const nextPosition = clampPosition(position, board.size);
-  if (tankCollidesWithWalls(nextPosition, board.walls) || tankCollidesWithTanks(nextPosition, tanks, movingTank)) {
-    return movingTank.position;
+  const wallHit = distanceBetween(position, nextPosition) > 0.001 || tankCollidesWithWalls(nextPosition, board.walls);
+  const tankHit = findTankCollision(nextPosition, tanks, movingTank);
+  if (wallHit || tankHit) {
+    return {
+      position: movingTank.position,
+      wallHit,
+      tankHit,
+    };
   }
 
-  return nextPosition;
+  return {
+    position: nextPosition,
+    wallHit: false,
+    tankHit: null,
+  };
 }
 
 function tankCollidesWithWalls(position: { x: number; y: number }, walls: { x: number; y: number }[]) {
@@ -838,12 +942,14 @@ function circleIntersectsCell(center: { x: number; y: number }, cell: { x: numbe
   return distanceBetween(center, { x: closestX, y: closestY }) < TANK_COLLISION_RADIUS_UNITS;
 }
 
-function tankCollidesWithTanks(position: { x: number; y: number }, tanks: any[], movingTank: any) {
-  return tanks.some(
-    (tank) =>
-      tank._id !== movingTank._id &&
-      tank.health > 0 &&
-      distanceBetween(position, tank.position) < TANK_COLLISION_RADIUS_UNITS * 2,
+function findTankCollision(position: { x: number; y: number }, tanks: any[], movingTank: any) {
+  return (
+    tanks.find(
+      (tank) =>
+        tank._id !== movingTank._id &&
+        tank.health > 0 &&
+        distanceBetween(position, tank.position) < TANK_COLLISION_RADIUS_UNITS * 2,
+    ) ?? null
   );
 }
 
@@ -857,11 +963,16 @@ function clampProjectilePosition(position: { x: number; y: number }, boardSize: 
 }
 
 function spawnPoint(index: 0 | 1) {
-  const cell = index === 0 ? 1 : BOARD_SIZE - 2;
-  return {
-    x: cell * UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS,
-    y: cell * UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS,
-  };
+  return index === 0 ?
+    {
+      x: UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS,
+      y: UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS,
+    }
+    :
+    {
+      x: (BOARD_SIZE - 1) * UNITS_PER_SQUARE - TANK_COLLISION_RADIUS_UNITS,
+      y: (BOARD_SIZE - 1) * UNITS_PER_SQUARE - TANK_COLLISION_RADIUS_UNITS,
+    };
 }
 
 function distanceBetween(a: { x: number; y: number }, b: { x: number; y: number }) {
@@ -875,10 +986,6 @@ function damageForImpact(distanceFromCenter: number, peakDamage: number) {
 
   const gaussian = Math.exp(-0.5 * (distanceFromCenter / PROJECTILE_DAMAGE_SIGMA) ** 2);
   return clamp(Math.round(peakDamage * gaussian), MIN_PROJECTILE_DAMAGE, peakDamage);
-}
-
-function commandPointsToUnits(points: number) {
-  return points * UNITS_PER_COMMAND_POINT;
 }
 
 function launchVelocity(power: number, angle: number) {
@@ -906,6 +1013,19 @@ function interpolate(value: number, from: number, fromValue: number, to: number,
 
 function roundForStorage(value: number) {
   return Math.round(value * 10000) / 10000;
+}
+
+function speedToUnitsPerTick(speed: number) {
+  const squaresPerSecond = (speed * 1000) / 3600;
+  return (squaresPerSecond * UNITS_PER_SQUARE) / FRAME_RATE;
+}
+
+function collisionDamageForSpeed(speedKph: number) {
+  if (speedKph <= 0) {
+    return 0;
+  }
+
+  return clamp(Math.round(speedKph * COLLISION_DAMAGE_PER_SPEED), 1, MAX_COLLISION_DAMAGE);
 }
 
 function normalizeTankSpec(spec: any) {
