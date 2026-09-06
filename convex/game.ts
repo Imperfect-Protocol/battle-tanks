@@ -388,11 +388,15 @@ export const submitOrders = mutation({
 });
 
 export const runNextTick = mutation({
-  args: { roomCode: v.string() },
+  args: {
+    roomCode: v.string(),
+    agentKey: v.optional(v.string()),
+  },
   returns: v.null(),
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
-    if (!userId) {
+    const agentKeyHash = args.agentKey ? await sha256(args.agentKey) : null;
+    if (!userId && !agentKeyHash) {
       throw new Error("Sign in before advancing battle");
     }
 
@@ -420,7 +424,7 @@ export const runNextTick = mutation({
       .query("players")
       .withIndex("by_match", (q) => q.eq("matchId", match._id))
       .collect();
-    if (!players.some((player) => player.userId === userId)) {
+    if (!players.some((player) => (userId && player.userId === userId) || (agentKeyHash && player.agentKeyHash === agentKeyHash))) {
       return null;
     }
 
@@ -470,7 +474,7 @@ export const runNextTick = mutation({
         .query("tanks")
         .withIndex("by_match", (q) => q.eq("matchId", match._id))
         .collect();
-      await advanceTankMotion(ctx, board, latestTanks, tankAfterCommand, now);
+      await advanceTankMotion(ctx, board, latestTanks, tankAfterCommand, match.currentTick + 1, now);
     }
 
     await advanceProjectiles(ctx, match._id, board.size, now);
@@ -734,7 +738,7 @@ function resolveMatchEnd(players: any[], tanks: any[]) {
   };
 }
 
-async function advanceTankMotion(ctx: any, board: any, tanks: any[], tank: any, now: number) {
+async function advanceTankMotion(ctx: any, board: any, tanks: any[], tank: any, tick: number, now: number) {
   if (tank.health <= 0) {
     return false;
   }
@@ -795,9 +799,11 @@ async function advanceTankMotion(ctx: any, board: any, tanks: any[], tank: any, 
   });
 
   let hitTankDestroyed = false;
+  let damageToOther = 0;
   if (move.type === "tank") {
     const hitTankSpeed = vectorLength(move.tank.velocity ?? { x: 0, y: 0 });
-    const hitHealth = Math.max(0, move.tank.health - collisionDamageForImpact(impactSpeed + hitTankSpeed * TANK_COLLISION_RESTITUTION));
+    damageToOther = collisionDamageForImpact(impactSpeed + hitTankSpeed * TANK_COLLISION_RESTITUTION);
+    const hitHealth = Math.max(0, move.tank.health - damageToOther);
     hitTankDestroyed = hitHealth <= 0;
     await ctx.db.patch(move.tank._id, {
       position: clampPosition(addVectors(move.tank.position, scaleVector(move.normal, -Math.max(move.penetration + 12, 36))), board.size),
@@ -807,6 +813,23 @@ async function advanceTankMotion(ctx: any, board: any, tanks: any[], tank: any, 
       updatedAt: now,
     });
   }
+
+  const collisionEvent: any = {
+    matchId: tank.matchId,
+    tankId: tank._id,
+    type: move.type,
+    position: move.position,
+    normal: move.normal,
+    impactSpeed,
+    damageToTank: damage,
+    tick,
+    createdAt: now,
+  };
+  if (move.type === "tank") {
+    collisionEvent.otherTankId = move.tank._id;
+    collisionEvent.damageToOther = damageToOther;
+  }
+  await ctx.db.insert("collisionEvents", collisionEvent);
 
   return movingHealth <= 0 || hitTankDestroyed;
 }
@@ -1199,6 +1222,11 @@ function dotProduct(a: { x: number; y: number }, b: { x: number; y: number }) {
 
 function vectorLength(vector: { x: number; y: number }) {
   return Math.hypot(vector.x, vector.y);
+}
+
+async function sha256(value: string) {
+  const buffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function normalizedVector(vector: { x: number; y: number }, fallback: { x: number; y: number }) {

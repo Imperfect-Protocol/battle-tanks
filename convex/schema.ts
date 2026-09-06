@@ -69,6 +69,7 @@ export default defineSchema({
     matchId: v.id("matches"),
     userId: v.optional(v.id("users")),
     commanderId: v.optional(v.id("commanderProfiles")),
+    agentKeyHash: v.optional(v.string()),
     name: v.string(),
     slot: v.union(v.literal("alpha"), v.literal("bravo")),
     score: v.number(),
@@ -126,4 +127,18 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
   }).index("by_match", ["matchId"]),
+
+  collisionEvents: defineTable({
+    matchId: v.id("matches"),
+    tankId: v.id("tanks"),
+    otherTankId: v.optional(v.id("tanks")),
+    type: v.union(v.literal("wall"), v.literal("tank")),
+    position: vector,
+    normal: vector,
+    impactSpeed: v.number(),
+    damageToTank: v.number(),
+    damageToOther: v.optional(v.number()),
+    tick: v.number(),
+    createdAt: v.number(),
+  }).index("by_match_and_created_at", ["matchId", "createdAt"]),
 });
