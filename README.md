@@ -1,7 +1,5 @@
 # Battle Tanks
 
-Project code: `WWEFFP`
-
 Battle Tanks is a Convex-backed realtime tank tactics game. Two players join the same board, submit command scripts, and watch the shared arena update in both browser sessions.
 
 ## Development
