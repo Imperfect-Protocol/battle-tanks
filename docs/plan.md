@@ -1,5 +1,14 @@
 # Tank Battle
 
+## End Of Game
+- battle should end when all players but one are elliminated
+- animations should continue after battle is finished
+- battle ended dialog should show after 3 seconds from end of battle
+- battle should be not showing in the lobby when it has finished rgardless of whether end of battle dialog is shown or close was clicked
+- you must consider battle as finished when all players but one are elliminated,and not after player clicks Close button
+- when creating new battle must ensure we don't reenter finished battle, create battle should always CREATE a battle and not join if name exists
+- when user enters name of the battle that already exists red text below that name should way that name was already used
+
 ## Collisions
  - compute collision impact vector from normals of colliding objects:
     - wall: use wall direction N,S,W,E
@@ -51,7 +60,9 @@ so queueing "move 3" should add 3: 1 + 3 = 4
 
 tank should accelerate to reach destination at 4 squares.
 
-when tank is turning maximum acceleration is capped at  50%
+- when tank is turning maximum acceleration is capped at  50%
+- acceleration should be recomputed each time new commands are queued, or on collision, or impact
+- tank at the moment of impact with projectile should loose 50% of its current speed, and should recompute acceleration
 
 ## Aiming 
 
@@ -62,6 +73,15 @@ It should be exact location where projectile will hit the ground.
 
 Projectile velocity needs to be calculated taking into account current tank velocity.
 When tank is stopped projectile maximum velocity should be 6 squares per second.
+
+Use either 50% of power or last used fire power to compute distance.
+
+## Targeting
+
+Draw target on opponent tank.
+When opponent tank is moving compute target ahead of tank movement.
+Make sure our player does not know commands of other player - they should be secret on server.
+We should only compute target based on observed velocity of the opponent tank.
 
 
 # AI integrartion
