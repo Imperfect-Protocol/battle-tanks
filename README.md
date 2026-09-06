@@ -4,12 +4,21 @@ Battle Tanks is a Convex-backed realtime tank tactics game. Two players join the
 
 ## Development
 
+First install dependencies, create the local Convex deployment, and generate the Convex Auth keys for that deployment:
+
 ```sh
 npm install
+npx convex dev --once
+npx @convex-dev/auth --skip-git-check --web-server-url http://127.0.0.1:5173
+```
+
+Then run the whole app:
+
+```sh
 npm run dev
 ```
 
-`npm run dev` starts Convex and Vite together after the app is connected to a Convex project.
+`npm run dev` starts Convex and Vite together. The auth setup command sets `JWT_PRIVATE_KEY`, `JWKS`, and `SITE_URL` on the local Convex deployment; those values are not committed to git.
 
 ## Auth
 
