@@ -14,68 +14,102 @@ export type Command =
 const rotationDegreesPerTick = 360 / (3 * 25);
 
 export class Orders {
-  constructor(readonly commands: Command[]) {}
+  constructor(readonly commands: Command[], readonly invalidCommands: string[] = []) {}
 
   get isEmpty() {
     return this.commands.length === 0;
   }
 
-  static parse(script: string) {
-    const commands = script
-      .split(/[\n,]+/)
-      .flatMap(normalizeCommand);
+  get hasInvalidCommands() {
+    return this.invalidCommands.length > 0;
+  }
 
-    return new Orders(commands);
+  static parse(script: string) {
+    const commands: Command[] = [];
+    const invalidCommands: string[] = [];
+
+    for (const command of script.split(/[\n,]+/)) {
+      const normalized = command.trim();
+      if (!normalized) {
+        continue;
+      }
+
+      const parsed = normalizeCommand(normalized);
+      if (!parsed) {
+        invalidCommands.push(normalized);
+        continue;
+      }
+
+      commands.push(...parsed);
+    }
+
+    return new Orders(commands, invalidCommands);
   }
 }
 
-function normalizeCommand(command: string): Command[] {
+function normalizeCommand(command: string): Command[] | null {
   const normalized = command.trim().toLowerCase().replace(/\s+/g, " ");
-  const [action, rawAmount, rawSecondAmount] = normalized.split(" ");
+  const [action, rawAmount, rawSecondAmount, extra] = normalized.split(" ");
+  if (extra !== undefined) {
+    return null;
+  }
 
   if (action === "wait") {
-    return ["wait"];
+    return rawAmount === undefined ? ["wait"] : null;
   }
 
   if (action === "lock" || action === "unlock") {
-    return [action];
+    return rawAmount === undefined ? [action] : null;
   }
 
   if (action === "forward" || action === "backward") {
-    return repeatCommand(`${action} 1`, boundedAmount(rawAmount, 10, 0, 120));
+    const amount = boundedAmount(rawAmount, 0, 120);
+    return amount === null ? null : repeatCommand(`${action} 1`, amount);
   }
 
   if (action === "fire") {
-    if (rawSecondAmount === undefined) {
-      return [`fire 100 ${roundForStorage(boundedNumber(rawAmount, 45, 30, 60))}`];
+    const power = boundedNumber(rawAmount, 10, 100);
+    const angle = boundedNumber(rawSecondAmount, 30, 60);
+    if (power === null || angle === null) {
+      return null;
     }
 
-    return [
-      `fire ${roundForStorage(boundedNumber(rawAmount, 100, 10, 100))} ${roundForStorage(boundedNumber(rawSecondAmount, 45, 30, 60))}`,
-    ];
+    return [`fire ${roundForStorage(power)} ${roundForStorage(angle)}`];
   }
 
   if (action === "left" || action === "right") {
+    const amount = boundedNumber(rawAmount, 0, 360);
+    if (amount === null) {
+      return null;
+    }
+
     const sign = action === "right" ? 1 : -1;
-    return expandRotationCommand("hull-step", sign * boundedNumber(rawAmount, 90, 0, 360));
+    return expandRotationCommand("hull-step", sign * amount);
   }
 
   if (action === "turret") {
-    return expandRotationCommand("turret-step", boundedNumber(rawAmount, 0, -360, 360));
+    const amount = boundedNumber(rawAmount, -360, 360);
+    return amount === null ? null : expandRotationCommand("turret-step", amount);
   }
 
-  return [];
+  return null;
 }
 
-function boundedAmount(rawAmount: string | undefined, fallback: number, min: number, max: number) {
-  return Math.round(boundedNumber(rawAmount, fallback, min, max));
+function boundedAmount(rawAmount: string | undefined, min: number, max: number) {
+  const amount = boundedNumber(rawAmount, min, max);
+  return amount === null ? null : Math.round(amount);
 }
 
-function boundedNumber(rawAmount: string | undefined, fallback: number, min: number, max: number) {
-  const amount = rawAmount === undefined ? fallback : Number(rawAmount);
+function boundedNumber(rawAmount: string | undefined, min: number, max: number) {
+  if (rawAmount === undefined) {
+    return null;
+  }
+
+  const amount = Number(rawAmount);
   if (!Number.isFinite(amount)) {
-    return fallback;
+    return null;
   }
+
   return Math.max(min, Math.min(max, amount));
 }
 

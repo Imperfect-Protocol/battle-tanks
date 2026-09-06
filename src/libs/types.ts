@@ -32,6 +32,7 @@ export type TankRecord = {
   turretLocked?: boolean;
   ammoType: AmmoType;
   health: number;
+  updatedAt: number;
 };
 
 export type ProjectileRecord = {

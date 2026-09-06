@@ -40,7 +40,8 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index("by_room_code", ["roomCode"])
-    .index("by_lobby_and_created_at", ["lobbyId", "createdAt"]),
+    .index("by_lobby_and_created_at", ["lobbyId", "createdAt"])
+    .index("by_lobby_status_and_created_at", ["lobbyId", "status", "createdAt"]),
 
   players: defineTable({
     matchId: v.id("matches"),

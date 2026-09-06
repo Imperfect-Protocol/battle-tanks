@@ -24,11 +24,17 @@ export function useGameRoom(roomCode: string) {
     createRoom,
     joinRoom,
     runNextTick,
-    submitScript: (playerName: string, script: string) =>
-      submitOrders({
+    submitScript: (playerName: string, script: string) => {
+      const orders = Orders.parse(script);
+      if (orders.isEmpty || orders.hasInvalidCommands) {
+        throw new Error("Incorrect command");
+      }
+
+      return submitOrders({
         roomCode,
         playerName,
-        commands: Orders.parse(script).commands,
-      }),
+        commands: orders.commands,
+      });
+    },
   };
 }

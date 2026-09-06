@@ -7,8 +7,9 @@ const MAX_HEALTH = 100;
 const COMMAND_POINTS_PER_SQUARE = 10;
 const UNITS_PER_SQUARE = 1000;
 const UNITS_PER_COMMAND_POINT = UNITS_PER_SQUARE / COMMAND_POINTS_PER_SQUARE;
-const TANK_RADIUS_UNITS = UNITS_PER_SQUARE / 2;
 const TANK_LENGTH_UNITS = UNITS_PER_SQUARE * 1.18;
+const TANK_WIDTH_UNITS = UNITS_PER_SQUARE * 0.62;
+const TANK_COLLISION_RADIUS_UNITS = Math.hypot(TANK_LENGTH_UNITS / 2, TANK_WIDTH_UNITS / 2);
 const TURRET_MOUNT_OFFSET_UNITS = -TANK_LENGTH_UNITS / 6;
 const TURRET_BARREL_UNITS = TANK_LENGTH_UNITS * 0.62;
 const PROJECTILE_HIT_RADIUS_UNITS = 750;
@@ -108,7 +109,7 @@ export const listBattles = query({
     const lobbyId = normalizeLobbyId(args.lobbyId);
     const matches = await ctx.db
       .query("matches")
-      .withIndex("by_lobby_and_created_at", (q) => q.eq("lobbyId", lobbyId))
+      .withIndex("by_lobby_status_and_created_at", (q) => q.eq("lobbyId", lobbyId).eq("status", "lobby"))
       .order("desc")
       .take(25);
 
@@ -118,6 +119,18 @@ export const listBattles = query({
         .query("players")
         .withIndex("by_match", (q) => q.eq("matchId", match._id))
         .take(2);
+      const tanks = await ctx.db
+        .query("tanks")
+        .withIndex("by_match", (q) => q.eq("matchId", match._id))
+        .take(2);
+
+      if (tanks.some((tank) => tank.health <= 0)) {
+        continue;
+      }
+
+      if (players.length >= 2) {
+        continue;
+      }
 
       rows.push({
         _id: match._id,
@@ -177,7 +190,7 @@ export const createRoom = mutation({
       velocity: { x: 0, y: 0 },
       hullDirection: 0,
       turretDirection: 0,
-      turretLocked: false,
+      turretLocked: true,
       ammoType: "missile",
       health: MAX_HEALTH,
       updatedAt: now,
@@ -232,7 +245,7 @@ export const joinRoom = mutation({
       velocity: { x: 0, y: 0 },
       hullDirection: slot === "alpha" ? 0 : 180,
       turretDirection: slot === "alpha" ? 0 : 180,
-      turretLocked: false,
+      turretLocked: true,
       ammoType: "missile",
       health: MAX_HEALTH,
       updatedAt: now,
@@ -336,7 +349,7 @@ export const runNextTick = mutation({
         (candidate) => candidate.tankId === tank._id && candidate.status !== "complete",
       );
       const command = order ? order.commands[order.cursor] : undefined;
-      await applyCommand(ctx, board.size, tank, command, now);
+      await applyCommand(ctx, board, tanks, tank, command, now);
 
       if (order) {
         const cursor = order.cursor + 1;
@@ -348,8 +361,10 @@ export const runNextTick = mutation({
       }
     }
 
-    await advanceProjectiles(ctx, match._id, board.size, now);
+    const wasAlreadyDestroyed = tanks.some((tank) => tank.health <= 0);
+    const wasDestroyedThisTick = await advanceProjectiles(ctx, match._id, board.size, now);
     await ctx.db.patch(match._id, {
+      status: wasAlreadyDestroyed || wasDestroyedThisTick ? "finished" : match.status,
       currentTick: match.currentTick + 1,
       lastTickAt: now,
       updatedAt: now,
@@ -389,7 +404,7 @@ async function ensureDefaultBoard(ctx: any, now: number) {
   });
 }
 
-async function applyCommand(ctx: any, boardSize: number, tank: any, command: string | undefined, now: number) {
+async function applyCommand(ctx: any, board: any, tanks: any[], tank: any, command: string | undefined, now: number) {
   if (tank.health <= 0 || !command) {
     return;
   }
@@ -446,7 +461,7 @@ async function applyCommand(ctx: any, boardSize: number, tank: any, command: str
     await ctx.db.insert("projectiles", {
       matchId: tank.matchId,
       ownerTankId: tank._id,
-      position: clampProjectilePosition(muzzle, boardSize),
+      position: clampProjectilePosition(muzzle, board.size),
       velocity,
       damage: MAX_PROJECTILE_DAMAGE,
       height: 0,
@@ -470,11 +485,18 @@ async function applyCommand(ctx: any, boardSize: number, tank: any, command: str
       x: tank.position.x + velocity.x,
       y: tank.position.y + velocity.y,
     };
-    await ctx.db.patch(tank._id, { position: clampPosition(position, boardSize), velocity, updatedAt: now });
+    const nextPosition = resolveTankMove(position, board, tanks, tank);
+    const moved = distanceBetween(nextPosition, tank.position) > 0.001;
+    await ctx.db.patch(tank._id, {
+      position: nextPosition,
+      velocity: moved ? velocity : { x: 0, y: 0 },
+      updatedAt: now,
+    });
   }
 }
 
 async function advanceProjectiles(ctx: any, matchId: any, boardSize: number, now: number) {
+  let destroyedTank = false;
   const tanks = await ctx.db
     .query("tanks")
     .withIndex("by_match", (q: any) => q.eq("matchId", matchId))
@@ -513,7 +535,7 @@ async function advanceProjectiles(ctx: any, matchId: any, boardSize: number, now
     const hitsGround = nextHeight <= 0 && nextVerticalVelocity < 0;
 
     if (hitsGround && !hitsWall) {
-      await applyBlastDamage(ctx, tanks, projectile, nextPosition, now);
+      destroyedTank = (await applyBlastDamage(ctx, tanks, projectile, nextPosition, now)) || destroyedTank;
     }
 
     await ctx.db.patch(projectile._id, {
@@ -525,6 +547,8 @@ async function advanceProjectiles(ctx: any, matchId: any, boardSize: number, now
       updatedAt: now,
     });
   }
+
+  return destroyedTank;
 }
 
 function normalizeRoom(roomCode: string) {
@@ -698,12 +722,13 @@ async function applyBlastDamage(
     .sort((a: any, b: any) => a.impactDistance - b.impactDistance)[0];
 
   if (!target) {
-    return;
+    return false;
   }
 
   const damage = damageForImpact(target.impactDistance, projectile.damage);
   const health = Math.max(0, target.tank.health - damage);
   await ctx.db.patch(target.tank._id, { health, updatedAt: now });
+  return health <= 0;
 }
 
 function normalizeDegrees(degrees: number) {
@@ -725,12 +750,44 @@ function clamp(value: number, min: number, max: number) {
 }
 
 function clampPosition(position: { x: number; y: number }, boardSize: number) {
-  const min = UNITS_PER_SQUARE + TANK_RADIUS_UNITS;
-  const max = boardSize * UNITS_PER_SQUARE - UNITS_PER_SQUARE - TANK_RADIUS_UNITS;
+  const min = UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS;
+  const max = boardSize * UNITS_PER_SQUARE - UNITS_PER_SQUARE - TANK_COLLISION_RADIUS_UNITS;
   return {
     x: clamp(position.x, min, max),
     y: clamp(position.y, min, max),
   };
+}
+
+function resolveTankMove(position: { x: number; y: number }, board: any, tanks: any[], movingTank: any) {
+  const nextPosition = clampPosition(position, board.size);
+  if (tankCollidesWithWalls(nextPosition, board.walls) || tankCollidesWithTanks(nextPosition, tanks, movingTank)) {
+    return movingTank.position;
+  }
+
+  return nextPosition;
+}
+
+function tankCollidesWithWalls(position: { x: number; y: number }, walls: { x: number; y: number }[]) {
+  return walls.some((wall) => circleIntersectsCell(position, wall));
+}
+
+function circleIntersectsCell(center: { x: number; y: number }, cell: { x: number; y: number }) {
+  const minX = cell.x * UNITS_PER_SQUARE;
+  const minY = cell.y * UNITS_PER_SQUARE;
+  const maxX = minX + UNITS_PER_SQUARE;
+  const maxY = minY + UNITS_PER_SQUARE;
+  const closestX = clamp(center.x, minX, maxX);
+  const closestY = clamp(center.y, minY, maxY);
+  return distanceBetween(center, { x: closestX, y: closestY }) < TANK_COLLISION_RADIUS_UNITS;
+}
+
+function tankCollidesWithTanks(position: { x: number; y: number }, tanks: any[], movingTank: any) {
+  return tanks.some(
+    (tank) =>
+      tank._id !== movingTank._id &&
+      tank.health > 0 &&
+      distanceBetween(position, tank.position) < TANK_COLLISION_RADIUS_UNITS * 2,
+  );
 }
 
 function clampProjectilePosition(position: { x: number; y: number }, boardSize: number) {
@@ -745,8 +802,8 @@ function clampProjectilePosition(position: { x: number; y: number }, boardSize: 
 function spawnPoint(index: 0 | 1) {
   const cell = index === 0 ? 1 : BOARD_SIZE - 2;
   return {
-    x: cell * UNITS_PER_SQUARE + TANK_RADIUS_UNITS,
-    y: cell * UNITS_PER_SQUARE + TANK_RADIUS_UNITS,
+    x: cell * UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS,
+    y: cell * UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS,
   };
 }
 
