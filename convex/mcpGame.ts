@@ -723,7 +723,7 @@ function cleanBattleName(name: string | undefined) {
 }
 
 function normalizeRoom(roomCode: string) {
-  return roomCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8) || "WWEFFP";
+  return roomCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8) || "Room";
 }
 
 function normalizeLobbyId(lobbyId: string | undefined) {
