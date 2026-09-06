@@ -68,6 +68,7 @@ export function BattleBoard({ gameRoom, localPlayerId = null }: BattleBoardProps
           color={normalizeTankSpec(localTank.record.tankSpec).hullColor}
           position={aimImpact.position}
           boardSize={boardSize}
+          variant="cross"
         />
       )}
       {targetMarkers.map((target) => (
@@ -77,6 +78,7 @@ export function BattleBoard({ gameRoom, localPlayerId = null }: BattleBoardProps
           color={target.color}
           position={target.position}
           boardSize={boardSize}
+          variant="rings"
         />
       ))}
       {gameRoom?.tanks.map((tank) => (
@@ -103,11 +105,13 @@ function GroundTarget({
   color,
   position,
   boardSize,
+  variant,
 }: {
   className: string;
   color: string;
   position: { x: number; y: number };
   boardSize: number;
+  variant: "cross" | "rings";
 }) {
   return (
     <div
@@ -119,10 +123,19 @@ function GroundTarget({
         } as React.CSSProperties
       }
     >
-      <i className="ground-target__ring ground-target__ring--outer" />
-      <i className="ground-target__ring ground-target__ring--inner" />
-      <i className="ground-target__line ground-target__line--horizontal" />
-      <i className="ground-target__line ground-target__line--vertical" />
+      {variant === "rings" && (
+        <>
+          <i className="ground-target__ring ground-target__ring--outer" />
+          <i className="ground-target__dot" />
+        </>
+      )}
+      {variant === "cross" && (
+        <>
+          <i className="ground-target__ring ground-target__ring--inner" />
+          <i className="ground-target__line ground-target__line--horizontal" />
+          <i className="ground-target__line ground-target__line--vertical" />
+        </>
+      )}
     </div>
   );
 }

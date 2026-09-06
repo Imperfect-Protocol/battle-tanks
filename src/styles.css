@@ -841,7 +841,8 @@ button {
 }
 
 .ground-target__ring,
-.ground-target__line {
+.ground-target__line,
+.ground-target__dot {
   border-color: var(--target-color, #24f7a7);
   box-shadow: 0 0 10px color-mix(in srgb, var(--target-color, #24f7a7), transparent 30%);
   position: absolute;
@@ -873,6 +874,16 @@ button {
   left: 50%;
   top: -18%;
   width: 1px;
+}
+
+.ground-target__dot {
+  aspect-ratio: 1;
+  background: var(--target-color, #24f7a7);
+  border-radius: 50%;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 6.25%;
 }
 
 .tank {
