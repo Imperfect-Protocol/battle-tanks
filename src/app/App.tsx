@@ -13,6 +13,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<SplashPage />} />
         <Route path="/sign-in" element={<SignInPage />} />
+        <Route path="/reset-password" element={<SignInPage />} />
         <Route
           path="/lobbies"
           element={

@@ -11,8 +11,6 @@ const UNITS_PER_COMMAND_POINT = UNITS_PER_SQUARE / COMMAND_POINTS_PER_SQUARE;
 const TANK_LENGTH_UNITS = UNITS_PER_SQUARE * 1.18;
 const TANK_WIDTH_UNITS = UNITS_PER_SQUARE * 0.62;
 const TANK_COLLISION_RADIUS_UNITS = Math.hypot(TANK_LENGTH_UNITS / 2, TANK_WIDTH_UNITS / 2);
-const TURRET_MOUNT_OFFSET_UNITS = -TANK_LENGTH_UNITS / 6;
-const TURRET_BARREL_UNITS = TANK_LENGTH_UNITS * 0.62;
 const PROJECTILE_HIT_RADIUS_UNITS = 750;
 const PROJECTILE_GRAVITY_UNITS = 48;
 const EXPLOSION_DURATION_MS = 360;
@@ -42,6 +40,16 @@ const LAUNCH_RANGE_BY_ANGLE: Record<number, number> = {
   45: 6 * UNITS_PER_SQUARE,
   60: 4 * UNITS_PER_SQUARE,
 };
+const DEFAULT_TANK_SPEC = {
+  hullColor: "#24f7a7",
+  turretOffset: 0.333,
+  cannonLength: 0.4,
+  turretSize: 0.92,
+};
+const TANK_COLORS = ["#24f7a7", "#40d8ff", "#ffe45c", "#ff6b9d", "#b5ff5c", "#ff9c45"];
+const TURRET_OFFSETS = [0.28, 0.333, 0.4, 0.48, 0.58];
+const CANNON_LENGTHS = [0.32, 0.38, 0.44, 0.5, 0.56];
+const TURRET_SIZES = [0.76, 0.84, 0.92, 1, 1.06];
 
 type StoredCommand =
   | { action: "wait"; amount: 0 }
@@ -199,6 +207,7 @@ export const createRoom = mutation({
       hullDirection: 0,
       turretDirection: 0,
       turretLocked: true,
+      tankSpec: commander.tankSpec,
       ammoType: "missile",
       health: MAX_HEALTH,
       updatedAt: now,
@@ -256,6 +265,7 @@ export const joinRoom = mutation({
       hullDirection: slot === "alpha" ? 0 : 180,
       turretDirection: slot === "alpha" ? 0 : 180,
       turretLocked: true,
+      tankSpec: commander.tankSpec,
       ammoType: "missile",
       health: MAX_HEALTH,
       updatedAt: now,
@@ -444,6 +454,7 @@ async function requireCommanderProfile(ctx: any, commanderId: any) {
     commanderId: profile._id,
     userId,
     displayName: profile.displayName,
+    tankSpec: normalizeTankSpec(profile.tankSpec ?? tankSpecFromSeed(`${profile._id}:${profile.displayName}`)),
   };
 }
 
@@ -495,8 +506,15 @@ async function applyCommand(ctx: any, board: any, tanks: any[], tank: any, comma
   if (parsed.action === "fire") {
     const launch = launchVelocity(parsed.power, parsed.angle);
     const velocity = vectorFromDegrees(angleFromDirection(tank.turretDirection), launch.horizontal);
-    const mountOffset = vectorFromDegrees(angleFromDirection(tank.hullDirection), TURRET_MOUNT_OFFSET_UNITS);
-    const barrelVector = vectorFromDegrees(angleFromDirection(tank.turretDirection), TURRET_BARREL_UNITS);
+    const tankSpec = normalizeTankSpec(tank.tankSpec);
+    const mountOffset = vectorFromDegrees(
+      angleFromDirection(tank.hullDirection),
+      (tankSpec.turretOffset - 0.5) * TANK_LENGTH_UNITS,
+    );
+    const barrelVector = vectorFromDegrees(
+      angleFromDirection(tank.turretDirection),
+      (tankSpec.turretSize * TANK_WIDTH_UNITS) / 2 + tankSpec.cannonLength * TANK_LENGTH_UNITS,
+    );
     const muzzle = {
       x: tank.position.x + mountOffset.x + barrelVector.x,
       y: tank.position.y + mountOffset.y + barrelVector.y,
@@ -888,4 +906,45 @@ function interpolate(value: number, from: number, fromValue: number, to: number,
 
 function roundForStorage(value: number) {
   return Math.round(value * 10000) / 10000;
+}
+
+function normalizeTankSpec(spec: any) {
+  if (!spec) {
+    return DEFAULT_TANK_SPEC;
+  }
+
+  return {
+    hullColor: typeof spec.hullColor === "string" ? spec.hullColor : DEFAULT_TANK_SPEC.hullColor,
+    turretOffset: clampFinite(spec.turretOffset, 0.24, 0.66, DEFAULT_TANK_SPEC.turretOffset),
+    cannonLength: clampFinite(spec.cannonLength, 0.3, 0.56, DEFAULT_TANK_SPEC.cannonLength),
+    turretSize: clampFinite(spec.turretSize, 0.74, 1.06, DEFAULT_TANK_SPEC.turretSize),
+  };
+}
+
+function tankSpecFromSeed(seed: string) {
+  const hash = hashString(seed);
+
+  return {
+    hullColor: TANK_COLORS[pick(hash, 0, TANK_COLORS.length)],
+    turretOffset: TURRET_OFFSETS[pick(hash, 8, TURRET_OFFSETS.length)],
+    cannonLength: CANNON_LENGTHS[pick(hash, 16, CANNON_LENGTHS.length)],
+    turretSize: TURRET_SIZES[pick(hash, 24, TURRET_SIZES.length)],
+  };
+}
+
+function pick(hash: number, shift: number, length: number) {
+  return Math.abs(hash >> shift) % length;
+}
+
+function hashString(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash;
+}
+
+function clampFinite(value: unknown, min: number, max: number, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? clamp(value, min, max) : fallback;
 }

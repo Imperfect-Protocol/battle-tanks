@@ -19,6 +19,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <ConvexAuthProvider
       client={convex}
       replaceURL={(relativeUrl) => window.history.replaceState(null, "", relativeUrl)}
+      shouldHandleCode={() => window.location.pathname !== "/reset-password"}
     >
       <BrowserRouter>
         <App />

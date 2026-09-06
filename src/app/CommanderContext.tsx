@@ -3,6 +3,7 @@ import { useQuery } from "convex/react";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
+import type { TankSpecRecord } from "../libs/types";
 
 const ACTIVE_COMMANDER_STORAGE_KEY = "battle-tanks.active-commander-id";
 
@@ -84,6 +85,7 @@ export function cleanDisplayName(name: string) {
 type CommanderSummary = {
   id: Id<"commanderProfiles">;
   displayName: string;
+  tankSpec?: TankSpecRecord;
 };
 
 type CommanderViewer = {

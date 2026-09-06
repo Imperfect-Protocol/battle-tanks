@@ -3,6 +3,17 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 import { mutation, query } from "./_generated/server";
 
 const MAX_DISPLAY_NAME_LENGTH = 32;
+const TANK_COLORS = ["#24f7a7", "#40d8ff", "#ffe45c", "#ff6b9d", "#b5ff5c", "#ff9c45"];
+const TURRET_OFFSETS = [0.28, 0.333, 0.4, 0.48, 0.58];
+const CANNON_LENGTHS = [0.32, 0.38, 0.44, 0.5, 0.56];
+const TURRET_SIZES = [0.76, 0.84, 0.92, 1, 1.06];
+
+const tankSpecValidator = v.object({
+  hullColor: v.string(),
+  turretOffset: v.number(),
+  cannonLength: v.number(),
+  turretSize: v.number(),
+});
 
 export const getViewer = query({
   args: {},
@@ -14,6 +25,7 @@ export const getViewer = query({
         v.object({
           id: v.id("commanderProfiles"),
           displayName: v.string(),
+          tankSpec: tankSpecValidator,
         }),
       ),
       suggestedDisplayName: v.string(),
@@ -39,6 +51,7 @@ export const getViewer = query({
       commanders: commanders.map((commander) => ({
         id: commander._id,
         displayName: commander.displayName,
+        tankSpec: commander.tankSpec ?? tankSpecFromSeed(`${commander._id}:${commander.displayName}`),
       })),
       suggestedDisplayName: suggestDisplayName(user?.name, user?.email),
       email: user?.email,
@@ -118,6 +131,7 @@ export const claimDisplayName = mutation({
     const commanderId = await ctx.db.insert("commanderProfiles", {
       userId,
       displayName,
+      tankSpec: tankSpecFromSeed(`${userId}:${displayName}:${now}`),
       createdAt: now,
       updatedAt: now,
     });
@@ -137,4 +151,28 @@ function suggestDisplayName(name: string | undefined, email: string | undefined)
   }
 
   return cleanDisplayName(email?.split("@")[0] ?? "") || "Commander";
+}
+
+function tankSpecFromSeed(seed: string) {
+  const hash = hashString(seed);
+
+  return {
+    hullColor: TANK_COLORS[pick(hash, 0, TANK_COLORS.length)],
+    turretOffset: TURRET_OFFSETS[pick(hash, 8, TURRET_OFFSETS.length)],
+    cannonLength: CANNON_LENGTHS[pick(hash, 16, CANNON_LENGTHS.length)],
+    turretSize: TURRET_SIZES[pick(hash, 24, TURRET_SIZES.length)],
+  };
+}
+
+function pick(hash: number, shift: number, length: number) {
+  return Math.abs(hash >> shift) % length;
+}
+
+function hashString(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash;
 }

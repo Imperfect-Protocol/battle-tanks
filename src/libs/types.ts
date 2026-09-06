@@ -6,6 +6,13 @@ export type VectorRecord = {
 export type AmmoType = "missile";
 export type LegacyDirection = "north" | "east" | "south" | "west";
 
+export type TankSpecRecord = {
+  hullColor: string;
+  turretOffset: number;
+  cannonLength: number;
+  turretSize: number;
+};
+
 export type PlayerRecord = {
   _id: string;
   userId?: string;
@@ -32,6 +39,7 @@ export type TankRecord = {
   hullDirection: number | LegacyDirection;
   turretDirection: number | LegacyDirection;
   turretLocked?: boolean;
+  tankSpec?: TankSpecRecord;
   ammoType: AmmoType;
   health: number;
   updatedAt: number;

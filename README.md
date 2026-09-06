@@ -36,3 +36,11 @@ npx convex env set AUTH_GITHUB_SECRET=<github-client-secret>
 ```
 
 Password sign-in does not need an external OAuth client.
+
+Password reset links are sent through Resend when this Convex environment variable is set:
+
+```sh
+npx convex env set AUTH_RESEND_KEY=<resend-api-key>
+```
+
+Without `AUTH_RESEND_KEY`, local development logs the reset link in the Convex output.

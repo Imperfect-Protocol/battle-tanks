@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { GameRoom } from "../libs/GameRoom";
 import type { Tank } from "../libs/Tank";
+import { normalizeTankSpec, tankSpecStyle } from "./TankAvatar";
 
 const CANNON_WIDTH_PX = 4;
 const PROJECTILE_CAMERA_HEIGHT_UNITS = 16000;
@@ -64,6 +65,7 @@ function TankPiece({ tank, boardSize, name }: { tank: Tank; boardSize: number; n
   const hullRotation = normalizeDegrees(angleFromDirection(tank.record.hullDirection));
   const turretHeading = normalizeDegrees(angleFromDirection(tank.record.turretDirection));
   const turretRotation = normalizeDegrees(turretHeading - hullRotation);
+  const tankSpec = normalizeTankSpec(tank.record.tankSpec);
   const isDestroyed = tank.health <= 0;
 
   return (
@@ -72,6 +74,7 @@ function TankPiece({ tank, boardSize, name }: { tank: Tank; boardSize: number; n
       style={
         {
           ...pointStyle(tank.position.x, tank.position.y, boardSize),
+          ...tankSpecStyle(tankSpec),
           "--hull-rotation": `${hullRotation}deg`,
           "--turret-rotation": `${turretRotation}deg`,
           "--turret-label-rotation": `${-turretHeading}deg`,

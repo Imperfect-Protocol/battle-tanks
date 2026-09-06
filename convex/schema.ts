@@ -7,6 +7,13 @@ const vector = v.object({
   y: v.number(),
 });
 
+const tankSpec = v.object({
+  hullColor: v.string(),
+  turretOffset: v.number(),
+  cannonLength: v.number(),
+  turretSize: v.number(),
+});
+
 const legacyDirection = v.union(
   v.literal("north"),
   v.literal("east"),
@@ -20,6 +27,7 @@ export default defineSchema({
   commanderProfiles: defineTable({
     userId: v.id("users"),
     displayName: v.string(),
+    tankSpec: v.optional(tankSpec),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -73,6 +81,7 @@ export default defineSchema({
     hullDirection: v.union(v.number(), legacyDirection),
     turretDirection: v.union(v.number(), legacyDirection),
     turretLocked: v.optional(v.boolean()),
+    tankSpec: v.optional(tankSpec),
     ammoType: v.union(v.literal("missile")),
     health: v.number(),
     updatedAt: v.number(),
