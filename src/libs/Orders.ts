@@ -1,17 +1,8 @@
 export type Command =
-  | `run ${number}`
-  | `turn ${number}`
+  | `bear ${number}`
+  | `move ${number}`
   | `aim ${number} ${number}`
-  | `hull-step ${number}`
-  | `turret-step ${number}`
-  | `aim-angle ${number}`
-  | `fire ${number}`
-  | "stop"
-  | "lock"
-  | "unlock"
-  | "wait";
-
-const rotationDegreesPerTick = 360 / (3 * 25);
+  | `fire ${number}`;
 
 export class Orders {
   constructor(readonly commands: Command[], readonly invalidCommands: string[] = []) {}
@@ -54,66 +45,47 @@ function normalizeCommand(command: string): Command[] | null {
     return null;
   }
 
-  if (action === "wait") {
-    return rawAmount === undefined ? ["wait"] : null;
-  }
-
-  if (action === "stop") {
-    return rawAmount === undefined ? ["stop"] : null;
-  }
-
-  if (action === "lock" || action === "unlock") {
-    return rawAmount === undefined ? [action] : null;
-  }
-
-  if (action === "run") {
-    const speed = boundedNumber(rawAmount, 0, 30);
-    return speed === null ? null : [`run ${roundForStorage(speed)}`];
-  }
-
-  if (action === "fire") {
+  if (action === "bear") {
+    const bearing = strictNumber(rawAmount, 0, 360);
     if (rawSecondAmount !== undefined) {
       return null;
     }
-    const power = boundedNumber(rawAmount, 10, 100);
-    if (power === null) {
+
+    return bearing === null ? null : [`bear ${roundForStorage(normalizeDegrees(bearing))}`];
+  }
+
+  if (action === "move") {
+    const squares = strictNumber(rawAmount, 0.1, 20);
+    if (squares === null || rawSecondAmount !== undefined) {
+      return null;
+    }
+
+    return [`move ${roundForStorage(squares)}`];
+  }
+
+  if (action === "aim") {
+    const bearing = strictNumber(rawAmount, 0, 360);
+    const elevation = strictNumber(rawSecondAmount, 10, 60);
+    if (bearing === null || elevation === null) {
+      return null;
+    }
+
+    return [`aim ${roundForStorage(normalizeDegrees(bearing))} ${roundForStorage(elevation)}`];
+  }
+
+  if (action === "fire") {
+    const power = strictNumber(rawAmount, 10, 100);
+    if (power === null || rawSecondAmount !== undefined) {
       return null;
     }
 
     return [`fire ${roundForStorage(power)}`];
   }
 
-  if (action === "turn") {
-    const amount = boundedNumber(rawAmount, -360, 360);
-    if (amount === null) {
-      return null;
-    }
-
-    return expandRotationCommand("hull-step", amount);
-  }
-
-  if (action === "aim") {
-    const horizontal = boundedNumber(rawAmount, -360, 360);
-    const vertical = boundedNumber(rawSecondAmount, 30, 60);
-    if (horizontal === null || vertical === null) {
-      return null;
-    }
-
-    return [
-      ...expandRotationCommand("turret-step", horizontal),
-      `aim-angle ${roundForStorage(vertical)}` as Command,
-    ];
-  }
-
   return null;
 }
 
-function boundedAmount(rawAmount: string | undefined, min: number, max: number) {
-  const amount = boundedNumber(rawAmount, min, max);
-  return amount === null ? null : Math.round(amount);
-}
-
-function boundedNumber(rawAmount: string | undefined, min: number, max: number) {
+function strictNumber(rawAmount: string | undefined, min: number, max: number) {
   if (rawAmount === undefined) {
     return null;
   }
@@ -123,17 +95,15 @@ function boundedNumber(rawAmount: string | undefined, min: number, max: number) 
     return null;
   }
 
-  return Math.max(min, Math.min(max, amount));
+  if (amount < min || amount > max) {
+    return null;
+  }
+
+  return amount;
 }
 
-function repeatCommand(command: Command, times: number) {
-  return Array.from({ length: times }, () => command);
-}
-
-function expandRotationCommand(action: "hull-step" | "turret-step", degrees: number): Command[] {
-  const stepCount = Math.max(1, Math.ceil(Math.abs(degrees) / rotationDegreesPerTick));
-  const stepDegrees = degrees / stepCount;
-  return Array.from({ length: stepCount }, () => `${action} ${roundForStorage(stepDegrees)}` as Command);
+function normalizeDegrees(degrees: number) {
+  return ((degrees % 360) + 360) % 360;
 }
 
 function roundForStorage(value: number) {

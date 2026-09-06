@@ -56,11 +56,13 @@ export default defineSchema({
     currentTick: v.number(),
     winnerPlayerId: v.optional(v.id("players")),
     lastTickAt: v.optional(v.number()),
+    finishedAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_room_code", ["roomCode"])
     .index("by_lobby_and_created_at", ["lobbyId", "createdAt"])
+    .index("by_lobby_and_battle_name", ["lobbyId", "battleName"])
     .index("by_lobby_status_and_created_at", ["lobbyId", "status", "createdAt"]),
 
   players: defineTable({
@@ -79,10 +81,13 @@ export default defineSchema({
     position: vector,
     velocity: vector,
     speed: v.optional(v.number()),
+    moveRemaining: v.optional(v.number()),
+    activeMoveCommand: v.optional(v.string()),
     hullDirection: v.union(v.number(), legacyDirection),
     turretDirection: v.union(v.number(), legacyDirection),
     turretLocked: v.optional(v.boolean()),
     launchAngle: v.optional(v.number()),
+    lastFirePower: v.optional(v.number()),
     tankSpec: v.optional(tankSpec),
     ammoType: v.union(v.literal("missile")),
     health: v.number(),

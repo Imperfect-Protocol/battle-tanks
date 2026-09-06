@@ -10,11 +10,26 @@ const DEFAULT_BOARD_SIZE = 12;
 
 type BattleBoardProps = {
   gameRoom: GameRoom | null;
+  localPlayerId?: string | null;
 };
 
-export function BattleBoard({ gameRoom }: BattleBoardProps) {
+export function BattleBoard({ gameRoom, localPlayerId = null }: BattleBoardProps) {
   const boardSize = gameRoom?.board?.size ?? DEFAULT_BOARD_SIZE;
   const walls = useMemo(() => gameRoom?.board?.walls ?? defaultWalls(boardSize), [gameRoom?.board, boardSize]);
+  const localTank = gameRoom?.tanks.find((tank) => tank.playerId === localPlayerId && tank.alive);
+  const aimImpact = localTank ? predictProjectileImpact(localTank, boardSize, localTank.record.lastFirePower ?? 50) : null;
+  const targetMarkers = localTank && aimImpact
+    ? gameRoom?.tanks
+      .filter((tank) => tank.playerId !== localPlayerId && tank.alive)
+      .map((tank) => ({
+        id: tank.id,
+        color: normalizeTankSpec(localTank.record.tankSpec).hullColor,
+        position: clampBoardPoint({
+          x: tank.position.x + tank.velocity.x * aimImpact.flightTicks,
+          y: tank.position.y + tank.velocity.y * aimImpact.flightTicks,
+        }, boardSize),
+      })) ?? []
+    : [];
   const [now, setNow] = useState(Date.now());
   const projectiles = useMemo(
     () =>
@@ -42,6 +57,23 @@ export function BattleBoard({ gameRoom }: BattleBoardProps) {
       {walls.map((wall) => (
         <div key={`${wall.x}-${wall.y}`} className="wall" style={cellStyle(wall.x, wall.y)} />
       ))}
+      {aimImpact && localTank && (
+        <GroundTarget
+          className="aim-target"
+          color={normalizeTankSpec(localTank.record.tankSpec).hullColor}
+          position={aimImpact.position}
+          boardSize={boardSize}
+        />
+      )}
+      {targetMarkers.map((target) => (
+        <GroundTarget
+          key={target.id}
+          className="target-marker"
+          color={target.color}
+          position={target.position}
+          boardSize={boardSize}
+        />
+      ))}
       {gameRoom?.tanks.map((tank) => (
         <TankPiece
           key={tank.id}
@@ -61,6 +93,35 @@ export function BattleBoard({ gameRoom }: BattleBoardProps) {
   );
 }
 
+function GroundTarget({
+  className,
+  color,
+  position,
+  boardSize,
+}: {
+  className: string;
+  color: string;
+  position: { x: number; y: number };
+  boardSize: number;
+}) {
+  return (
+    <div
+      className={`ground-target ${className}`}
+      style={
+        {
+          ...pointStyle(position.x, position.y, boardSize),
+          "--target-color": color,
+        } as React.CSSProperties
+      }
+    >
+      <i className="ground-target__ring ground-target__ring--outer" />
+      <i className="ground-target__ring ground-target__ring--inner" />
+      <i className="ground-target__line ground-target__line--horizontal" />
+      <i className="ground-target__line ground-target__line--vertical" />
+    </div>
+  );
+}
+
 function TankPiece({ tank, boardSize, name }: { tank: Tank; boardSize: number; name: string }) {
   const hullRotation = normalizeDegrees(angleFromDirection(tank.record.hullDirection));
   const turretHeading = normalizeDegrees(angleFromDirection(tank.record.turretDirection));
@@ -75,9 +136,9 @@ function TankPiece({ tank, boardSize, name }: { tank: Tank; boardSize: number; n
         {
           ...pointStyle(tank.position.x, tank.position.y, boardSize),
           ...tankSpecStyle(tankSpec),
-          "--hull-rotation": `${hullRotation}deg`,
+          "--hull-rotation": `${hullRotation - 90}deg`,
           "--turret-rotation": `${turretRotation}deg`,
-          "--turret-label-rotation": `${-turretHeading}deg`,
+          "--turret-label-rotation": `${90 - turretHeading}deg`,
         } as React.CSSProperties
       }
     >
@@ -132,6 +193,79 @@ function projectileStyle(x: number, y: number, height: number, boardSize: number
   } as React.CSSProperties;
 }
 
+function predictProjectileImpact(tank: Tank, boardSize: number, power: number) {
+  const tankSpec = normalizeTankSpec(tank.record.tankSpec);
+  const launch = launchVelocity(power, tank.record.launchAngle ?? 45);
+  const muzzleVelocity = vectorFromBearing(angleFromDirection(tank.record.turretDirection), launch.horizontal);
+  const velocity = {
+    x: muzzleVelocity.x + tank.velocity.x,
+    y: muzzleVelocity.y + tank.velocity.y,
+  };
+  const mountOffset = vectorFromBearing(
+    angleFromDirection(tank.record.hullDirection),
+    (tankSpec.turretOffset - 0.5) * 1180,
+  );
+  const barrelVector = vectorFromBearing(
+    angleFromDirection(tank.record.turretDirection),
+    (tankSpec.turretSize * 620) / 2 + tankSpec.cannonLength * 1180,
+  );
+  const muzzle = {
+    x: tank.position.x + mountOffset.x + barrelVector.x,
+    y: tank.position.y + mountOffset.y + barrelVector.y,
+  };
+  const flightTicks = Math.max(1, (2 * launch.vertical) / 48);
+  return {
+    flightTicks,
+    position: clampBoardPoint({
+      x: muzzle.x + velocity.x * flightTicks,
+      y: muzzle.y + velocity.y * flightTicks,
+    }, boardSize),
+  };
+}
+
+function launchVelocity(power: number, angle: number) {
+  const launchAngle = Math.max(10, Math.min(60, angle));
+  const radians = (launchAngle * Math.PI) / 180;
+  const targetRange = fullPowerRangeForAngle(launchAngle) * (power / 100);
+  const launchSpeed = Math.sqrt(targetRange * 48 / Math.sin(2 * radians));
+  return {
+    horizontal: Math.cos(radians) * launchSpeed,
+    vertical: Math.sin(radians) * launchSpeed,
+  };
+}
+
+function fullPowerRangeForAngle(angle: number) {
+  if (angle <= 30) {
+    return 8000;
+  }
+  if (angle <= 45) {
+    return interpolate(angle, 30, 8000, 45, 6000);
+  }
+  return interpolate(angle, 45, 6000, 60, 4000);
+}
+
+function interpolate(value: number, from: number, fromValue: number, to: number, toValue: number) {
+  const t = (value - from) / (to - from);
+  return fromValue + (toValue - fromValue) * t;
+}
+
+function vectorFromBearing(degrees: number, magnitude: number) {
+  const radians = ((normalizeDegrees(degrees) - 90) * Math.PI) / 180;
+  return {
+    x: Math.cos(radians) * magnitude,
+    y: Math.sin(radians) * magnitude,
+  };
+}
+
+function clampBoardPoint(point: { x: number; y: number }, boardSize: number) {
+  const min = 1000;
+  const max = boardSize * 1000 - 1000;
+  return {
+    x: Math.max(min, Math.min(max, point.x)),
+    y: Math.max(min, Math.min(max, point.y)),
+  };
+}
+
 function perspectiveSizeForHeight(height: number) {
   const cameraDistance = Math.max(PROJECTILE_CAMERA_HEIGHT_UNITS * 0.35, PROJECTILE_CAMERA_HEIGHT_UNITS - height);
   const projectedSize = CANNON_WIDTH_PX * (PROJECTILE_CAMERA_HEIGHT_UNITS / cameraDistance);
@@ -148,9 +282,9 @@ function angleFromDirection(direction: Tank["record"]["hullDirection"]) {
   }
 
   return {
-    east: 0,
-    south: 90,
-    west: 180,
-    north: 270,
+    north: 0,
+    east: 90,
+    south: 180,
+    west: 270,
   }[direction];
 }

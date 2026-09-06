@@ -6,8 +6,8 @@ import { BattleConsole } from "../components/BattleConsole";
 import { useGameRoom } from "../hooks/useGameRoom";
 
 const GAME_TICK_MS = 40;
-const GAME_OVER_DELAY_MS = 5000;
-const HELP_TEXT = "COMMANDS: forward <points>, backward <points>, turn <degrees>, aim <degrees> <elevation>, fire <power>, lock, unlock, wait";
+const GAME_OVER_DELAY_MS = 3000;
+const HELP_TEXT = "COMMANDS: bear <0-360>, aim <0-360> <10-60>, move <squares>, fire <10-100>";
 
 export function BattlePage() {
   const navigate = useNavigate();
@@ -15,6 +15,7 @@ export function BattlePage() {
   const [searchParams] = useSearchParams();
   const { displayName, commanderId } = useCommander();
   const [battleName, setBattleName] = useState("Battle");
+  const [battleNameError, setBattleNameError] = useState("");
   const joinAttemptedRef = useRef(false);
   const cleanRoomCode = roomCode.toUpperCase();
   const { gameRoom, createRoom, joinRoom, submitScript, runNextTick } = useGameRoom(cleanRoomCode);
@@ -27,9 +28,12 @@ export function BattlePage() {
   const isJoinRoute = searchParams.get("join") === "1";
   const destroyedTank = gameRoom?.tanks.find((tank) => tank.health <= 0);
   const destroyedPlayer = gameRoom?.players.find((player) => player.id === destroyedTank?.playerId);
+  const winnerPlayer = gameRoom?.players.find((player) => player.id === gameRoom.match?.winnerPlayerId);
   const [now, setNow] = useState(Date.now());
   const showGameOver = Boolean(
-    destroyedTank && now - (destroyedTank.record.updatedAt ?? now) >= GAME_OVER_DELAY_MS,
+    gameRoom?.match?.status === "finished" &&
+      gameRoom.match.finishedAt &&
+      now - gameRoom.match.finishedAt >= GAME_OVER_DELAY_MS,
   );
 
   useEffect(() => {
@@ -60,13 +64,13 @@ export function BattlePage() {
   }, [cleanRoomCode, commanderId, hasJoinedRoom, isJoinRoute, joinRoom, navigate, roomExists]);
 
   useEffect(() => {
-    if (!destroyedTank) {
+    if (!gameRoom?.match?.finishedAt) {
       return;
     }
 
     const timer = window.setInterval(() => setNow(Date.now()), 250);
     return () => window.clearInterval(timer);
-  }, [destroyedTank]);
+  }, [gameRoom?.match?.finishedAt]);
 
   const createBattle = async (event: FormEvent) => {
     event.preventDefault();
@@ -74,8 +78,14 @@ export function BattlePage() {
       return;
     }
 
-    await createRoom({ roomCode: cleanRoomCode, commanderId, battleName });
-    navigate(`/battle/${cleanRoomCode}`, { replace: true });
+    setBattleNameError("");
+    try {
+      await createRoom({ roomCode: cleanRoomCode, commanderId, battleName });
+      navigate(`/battle/${cleanRoomCode}`, { replace: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Battle name already used";
+      setBattleNameError(message.includes("Battle name") ? "Battle name already used" : message);
+    }
   };
 
   const submitCommand = async (command: string) => {
@@ -136,14 +146,22 @@ export function BattlePage() {
 
       <section className="battle-workbench">
         <div className="board-stage">
-          <BattleBoard gameRoom={gameRoom} />
+          <BattleBoard gameRoom={gameRoom} localPlayerId={localPlayer?.id ?? null} />
           {isCreateRoute && !roomExists && (
             <div className="battle-dialog">
               <form className="protocol-panel battle-dialog__panel" onSubmit={createBattle}>
                 <p className="eyebrow">Create Battle</p>
                 <label className="field">
                   <span>Name</span>
-                  <input autoFocus value={battleName} onChange={(event) => setBattleName(event.target.value)} />
+                  <input
+                    autoFocus
+                    value={battleName}
+                    onChange={(event) => {
+                      setBattleName(event.target.value);
+                      setBattleNameError("");
+                    }}
+                  />
+                  {battleNameError && <small className="field-error">{battleNameError}</small>}
                 </label>
                 <div className="dialog-stat">
                   <span>Players</span>
@@ -175,7 +193,7 @@ export function BattlePage() {
             <div className="battle-dialog">
               <div className="protocol-panel battle-dialog__panel game-over-panel">
                 <p className="eyebrow">Game Over</p>
-                <h2>{destroyedPlayer?.name ?? "Tank"} destroyed</h2>
+                <h2>{winnerPlayer ? `${winnerPlayer.name} wins` : `${destroyedPlayer?.name ?? "Tank"} destroyed`}</h2>
                 <button className="button button--primary" type="button" onClick={closeBattleTab}>
                   Close
                 </button>
@@ -226,19 +244,19 @@ function describeSingleCommand(command: string) {
   const [action, rawAmount, rawSecondAmount] = command.trim().toLowerCase().replace(/\s+/g, " ").split(" ");
   const amount = Number(rawAmount);
 
+  if (action === "bear" && Number.isFinite(amount)) {
+    return `Bearing ${amount} degrees`;
+  }
+
   if (action === "aim" && Number.isFinite(amount)) {
     const elevation = Number(rawSecondAmount);
     if (Number.isFinite(elevation)) {
-      return `Aim ${Math.abs(amount)} degrees ${amount < 0 ? "left" : "right"} at ${elevation} degrees elevation`;
+      return `Aim ${amount} degrees at ${elevation} degrees elevation`;
     }
   }
 
-  if (action === "turn" && Number.isFinite(amount)) {
-    return `Turn ${Math.abs(amount)} degrees ${amount < 0 ? "left" : "right"}`;
-  }
-
-  if ((action === "forward" || action === "backward") && Number.isFinite(amount)) {
-    return `${capitalize(action)} ${amount} points`;
+  if (action === "move" && Number.isFinite(amount)) {
+    return `Move ${amount} squares`;
   }
 
   if (action === "fire") {
@@ -248,21 +266,5 @@ function describeSingleCommand(command: string) {
     }
   }
 
-  if (action === "lock") {
-    return "Turret locked";
-  }
-
-  if (action === "unlock") {
-    return "Turret unlocked";
-  }
-
-  if (action === "wait") {
-    return "Wait";
-  }
-
   return "Accepted";
-}
-
-function capitalize(value: string) {
-  return value.charAt(0).toUpperCase() + value.slice(1);
 }

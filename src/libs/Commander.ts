@@ -1,7 +1,7 @@
 import type { Command } from "./Orders";
 
 export abstract class Commander {
-  abstract nextCommand(): Command;
+  abstract nextCommand(): Command | null;
 }
 
 export class SimpleCommander extends Commander {
@@ -11,8 +11,8 @@ export class SimpleCommander extends Commander {
     super();
   }
 
-  nextCommand(): Command {
-    const command = this.commands[this.cursor] ?? "wait";
+  nextCommand(): Command | null {
+    const command = this.commands[this.cursor] ?? null;
     this.cursor += 1;
     return command;
   }

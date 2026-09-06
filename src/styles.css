@@ -824,6 +824,57 @@ button {
   box-shadow: inset 0 0 8px rgba(36, 247, 167, 0.12);
 }
 
+.ground-target {
+  height: calc(100% / var(--cells) * 0.75);
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  transform: translate(-50%, -50%);
+  width: calc(100% / var(--cells) * 0.75);
+  z-index: 1;
+}
+
+.target-marker {
+  opacity: 0.72;
+  z-index: 4;
+}
+
+.ground-target__ring,
+.ground-target__line {
+  border-color: var(--target-color, #24f7a7);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--target-color, #24f7a7), transparent 30%);
+  position: absolute;
+}
+
+.ground-target__ring {
+  border: 1px solid var(--target-color, #24f7a7);
+  border-radius: 50%;
+  inset: 0;
+}
+
+.ground-target__ring--inner {
+  inset: 16.666%;
+}
+
+.ground-target__line {
+  background: var(--target-color, #24f7a7);
+}
+
+.ground-target__line--horizontal {
+  height: 1px;
+  left: -18%;
+  right: -18%;
+  top: 50%;
+}
+
+.ground-target__line--vertical {
+  bottom: -18%;
+  left: 50%;
+  top: -18%;
+  width: 1px;
+}
+
 .tank {
   align-items: center;
   background: linear-gradient(

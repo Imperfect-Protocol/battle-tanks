@@ -9,12 +9,11 @@ Battle Tanks is a small realtime multiplayer tactics game built with a Vite Reac
 Players join the same room, each controls a tank, and each submits a short command script such as:
 
 ```text
-forward 20
-turn 30
-lock
-backward 10
-aim -50 45
-unlock
+bear 90
+move 5
+bear 180
+move 3
+aim 200 30
 fire 70
 ```
 
@@ -26,13 +25,13 @@ The first shippable version is intentionally simple:
 - two player slots
 - one tank per player
 - one ammunition type: missile
-- command scripts with point and degree amounts: `forward 20`, `backward 10`, `turn 30`, `aim -50 45`, `fire 70`, `lock`, `unlock`, and `wait`
+- command scripts with absolute bearing, movement, aim, and fire commands: `bear 90`, `move 5`, `aim 200 30`, and `fire 70`
 - shared state synced through Convex
 - frontend deployed through Convex Static Hosting on `convex.site`
 
-The arena is 12 by 12 squares, and each square is stored as 1000 by 1000 internal game units. Tank and projectile locations can sit anywhere in the 12000 by 12000 unit coordinate space while the border wall still occupies the outer square of the arena. Command distances stay human-sized: 10 command points equals one square, so `forward 20` moves two squares. The match ticks at 25 frames per second; a `forward 20` command is queued as twenty `forward 1` frame steps. Hull and turret rotation also happen over time: a full 360-degree rotation takes three seconds.
+The arena is 12 by 12 squares, and each square is stored as 1000 by 1000 internal game units. Tank and projectile locations can sit anywhere in the 12000 by 12000 unit coordinate space while the border wall still occupies the outer square of the arena. The match ticks at 25 frames per second. Movement uses acceleration and deceleration, capped at three squares per second, and `move 5` means travel five board squares in the current hull bearing. Hull and turret rotation also happen over time: a full 360-degree rotation takes three seconds.
 
-Hull, turret, and launch angles are continuous. The `turn` command rotates the hull with signed degrees. The `aim` command takes signed horizontal turret degrees and a vertical launch angle: `aim -30 60` means aim 30 degrees left at 60 degrees elevation. The `fire` command takes power: `fire 70` means 70% power using the tank's current elevation. Power is clamped from 10% to 100%, and launch angle can be any value from 30 to 60 degrees. At 100% power, launch velocity is calculated so 30 degrees flies about 8 squares, 45 degrees about 6 squares, and 60 degrees about 4 squares, with intermediate angles interpolated. Projectile impacts briefly become a large yellow-orange explosion. Impacts use a radius around the target tank center; damage is strongest at the center and falls off with a normal-distribution curve, with the hit radius tied to that damage curve's interquartile width.
+Hull, turret, and launch angles are continuous absolute bearings: `0` is north, `90` is east, `180` is south, and `270` is west. The `bear` command rotates the hull toward an absolute bearing. The `aim` command takes an absolute horizontal bearing and a vertical launch angle: `aim 200 30` aims toward bearing 200 at 30 degrees elevation. The `fire` command takes power: `fire 70` means 70% power using the tank's current elevation. Values outside the allowed command ranges are rejected. At 100% power, launch velocity is calculated so 30 degrees flies about 8 squares, 45 degrees about 6 squares, and 60 degrees about 4 squares, with intermediate angles interpolated. Projectile impacts briefly become a large yellow-orange explosion. Impacts use a radius around the target tank center; damage is strongest at the center and falls off with a normal-distribution curve, with the hit radius tied to that damage curve's interquartile width.
 
 The future version can add better maps, obstacles, richer projectiles, simultaneous turns, AI commanders, and smarter conditional orders.
 

@@ -11,7 +11,14 @@ export class GameRoom {
   readonly projectiles: Missile[];
 
   constructor(
-    readonly match: { roomCode: string; status: string; currentTick: number } | null,
+    readonly match: {
+      roomCode: string;
+      status: string;
+      currentTick: number;
+      winnerPlayerId?: string;
+      finishedAt?: number;
+      updatedAt?: number;
+    } | null,
     board: BoardRecord | null,
     players: PlayerRecord[],
     tanks: TankRecord[],

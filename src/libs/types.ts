@@ -37,10 +37,13 @@ export type TankRecord = {
   position: VectorRecord;
   velocity: VectorRecord;
   speed?: number;
+  moveRemaining?: number;
+  activeMoveCommand?: string;
   hullDirection: number | LegacyDirection;
   turretDirection: number | LegacyDirection;
   turretLocked?: boolean;
   launchAngle?: number;
+  lastFirePower?: number;
   tankSpec?: TankSpecRecord;
   ammoType: AmmoType;
   health: number;
