@@ -1,5 +1,6 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
+import { authTables } from "@convex-dev/auth/server";
 
 const vector = v.object({
   x: v.number(),
@@ -14,6 +15,17 @@ const legacyDirection = v.union(
 );
 
 export default defineSchema({
+  ...authTables,
+
+  commanderProfiles: defineTable({
+    userId: v.id("users"),
+    displayName: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_display_name", ["displayName"]),
+
   boards: defineTable({
     code: v.string(),
     name: v.string(),
@@ -45,6 +57,8 @@ export default defineSchema({
 
   players: defineTable({
     matchId: v.id("matches"),
+    userId: v.optional(v.id("users")),
+    commanderId: v.optional(v.id("commanderProfiles")),
     name: v.string(),
     slot: v.union(v.literal("alpha"), v.literal("bravo")),
     score: v.number(),

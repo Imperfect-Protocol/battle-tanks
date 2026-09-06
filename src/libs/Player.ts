@@ -7,6 +7,14 @@ export class Player {
     return this.record._id;
   }
 
+  get userId() {
+    return this.record.userId;
+  }
+
+  get commanderId() {
+    return this.record.commanderId;
+  }
+
   get name() {
     return this.record.name;
   }

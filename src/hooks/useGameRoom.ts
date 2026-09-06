@@ -1,5 +1,6 @@
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
 import { GameRoom } from "../libs/GameRoom";
 import { Orders } from "../libs/Orders";
 
@@ -24,7 +25,7 @@ export function useGameRoom(roomCode: string) {
     createRoom,
     joinRoom,
     runNextTick,
-    submitScript: (playerName: string, script: string) => {
+    submitScript: (commanderId: Id<"commanderProfiles">, script: string) => {
       const orders = Orders.parse(script);
       if (orders.isEmpty || orders.hasInvalidCommands) {
         throw new Error("Incorrect command");
@@ -32,7 +33,7 @@ export function useGameRoom(roomCode: string) {
 
       return submitOrders({
         roomCode,
-        playerName,
+        commanderId,
         commands: orders.commands,
       });
     },

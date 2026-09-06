@@ -13,13 +13,13 @@ export function BattlePage() {
   const navigate = useNavigate();
   const { roomCode = "" } = useParams();
   const [searchParams] = useSearchParams();
-  const { displayName } = useCommander();
+  const { displayName, commanderId } = useCommander();
   const [battleName, setBattleName] = useState("Battle");
   const joinAttemptedRef = useRef(false);
   const cleanRoomCode = roomCode.toUpperCase();
   const { gameRoom, createRoom, joinRoom, submitScript, runNextTick } = useGameRoom(cleanRoomCode);
   const tankByPlayer = useMemo(() => new Map(gameRoom?.tanks.map((tank) => [tank.playerId, tank]) ?? []), [gameRoom]);
-  const localPlayer = gameRoom?.players.find((player) => player.name === displayName);
+  const localPlayer = gameRoom?.players.find((player) => player.commanderId === commanderId);
   const ownsClock = localPlayer?.slot === "alpha";
   const roomExists = Boolean(gameRoom?.match);
   const hasJoinedRoom = Boolean(localPlayer);
@@ -50,10 +50,14 @@ export function BattlePage() {
     }
 
     joinAttemptedRef.current = true;
-    void joinRoom({ roomCode: cleanRoomCode, playerName: displayName }).then(() => {
+    if (!commanderId) {
+      return;
+    }
+
+    void joinRoom({ roomCode: cleanRoomCode, commanderId }).then(() => {
       navigate(`/battle/${cleanRoomCode}`, { replace: true });
     });
-  }, [cleanRoomCode, displayName, hasJoinedRoom, isJoinRoute, joinRoom, navigate, roomExists]);
+  }, [cleanRoomCode, commanderId, hasJoinedRoom, isJoinRoute, joinRoom, navigate, roomExists]);
 
   useEffect(() => {
     if (!destroyedTank) {
@@ -66,7 +70,11 @@ export function BattlePage() {
 
   const createBattle = async (event: FormEvent) => {
     event.preventDefault();
-    await createRoom({ roomCode: cleanRoomCode, playerName: displayName, battleName });
+    if (!commanderId) {
+      return;
+    }
+
+    await createRoom({ roomCode: cleanRoomCode, commanderId, battleName });
     navigate(`/battle/${cleanRoomCode}`, { replace: true });
   };
 
@@ -75,7 +83,11 @@ export function BattlePage() {
       return HELP_TEXT;
     }
 
-    await submitScript(displayName, command);
+    if (!commanderId) {
+      throw new Error("Choose a commander before submitting orders");
+    }
+
+    await submitScript(commanderId, command);
     if (ownsClock) {
       void runNextTick({ roomCode: cleanRoomCode });
     }
@@ -94,7 +106,7 @@ export function BattlePage() {
   return (
     <main className="screen battle-screen">
       <header className="app-header battle-header">
-        <Link className="brand-lockup" to="/lobbies/pvp">
+        <Link className="brand-lockup" to="/">
           <span>BATTLE TANKS</span>
           <strong>{readBattleName(gameRoom?.match)}</strong>
         </Link>

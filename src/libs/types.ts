@@ -8,6 +8,8 @@ export type LegacyDirection = "north" | "east" | "south" | "west";
 
 export type PlayerRecord = {
   _id: string;
+  userId?: string;
+  commanderId?: string;
   name: string;
   score: number;
   slot: "alpha" | "bravo";

@@ -1,32 +1,69 @@
-import { createContext, ReactNode, useContext, useMemo, useState } from "react";
+import { createContext, ReactNode, useContext, useEffect, useMemo, useState } from "react";
+import { useAuthActions } from "@convex-dev/auth/react";
+import { useQuery } from "convex/react";
+import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
 
-const STORAGE_KEY = "battle-tanks.display-name";
+const ACTIVE_COMMANDER_STORAGE_KEY = "battle-tanks.active-commander-id";
 
 type CommanderContextValue = {
   displayName: string;
-  setDisplayName: (name: string) => void;
-  clearDisplayName: () => void;
+  userId: string | null;
+  commanderId: Id<"commanderProfiles"> | null;
+  commanders: CommanderSummary[];
+  suggestedDisplayName: string;
+  hasCommander: boolean;
+  isLoadingProfile: boolean;
+  setActiveCommanderId: (commanderId: Id<"commanderProfiles">) => void;
+  signOutCommander: () => void;
 };
 
 const CommanderContext = createContext<CommanderContextValue | null>(null);
 
 export function CommanderProvider({ children }: { children: ReactNode }) {
-  const [displayName, setDisplayNameState] = useState(readStoredDisplayName);
+  const viewer = useQuery(api.profiles.getViewer) as CommanderViewer | null | undefined;
+  const { signOut } = useAuthActions();
+  const [activeCommanderId, setActiveCommanderIdState] = useState<Id<"commanderProfiles"> | "">(
+    readActiveCommanderId,
+  );
+  const commanders = viewer?.commanders ?? [];
+  const activeCommander =
+    commanders.find((commander) => commander.id === activeCommanderId) ?? commanders[0] ?? null;
+
+  useEffect(() => {
+    if (viewer === undefined) {
+      return;
+    }
+
+    const nextCommanderId = activeCommander?.id ?? "";
+    if (nextCommanderId === activeCommanderId) {
+      return;
+    }
+
+    setActiveCommanderIdState(nextCommanderId);
+    writeActiveCommanderId(nextCommanderId);
+  }, [activeCommander?.id, activeCommanderId, viewer]);
 
   const value = useMemo<CommanderContextValue>(
     () => ({
-      displayName,
-      setDisplayName: (name) => {
-        const nextName = cleanDisplayName(name);
-        window.localStorage.setItem(STORAGE_KEY, nextName);
-        setDisplayNameState(nextName);
+      displayName: activeCommander?.displayName ?? "",
+      userId: viewer?.userId ?? null,
+      commanderId: activeCommander?.id ?? null,
+      commanders,
+      suggestedDisplayName: viewer?.suggestedDisplayName ?? "",
+      hasCommander: Boolean(activeCommander),
+      isLoadingProfile: viewer === undefined,
+      setActiveCommanderId: (commanderId) => {
+        setActiveCommanderIdState(commanderId);
+        writeActiveCommanderId(commanderId);
       },
-      clearDisplayName: () => {
-        window.localStorage.removeItem(STORAGE_KEY);
-        setDisplayNameState("");
+      signOutCommander: () => {
+        writeActiveCommanderId("");
+        setActiveCommanderIdState("");
+        void signOut();
       },
     }),
-    [displayName],
+    [activeCommander, commanders, signOut, viewer],
   );
 
   return <CommanderContext.Provider value={value}>{children}</CommanderContext.Provider>;
@@ -44,6 +81,26 @@ export function cleanDisplayName(name: string) {
   return name.trim().slice(0, 32);
 }
 
-function readStoredDisplayName() {
-  return cleanDisplayName(window.localStorage.getItem(STORAGE_KEY) ?? "");
+type CommanderSummary = {
+  id: Id<"commanderProfiles">;
+  displayName: string;
+};
+
+type CommanderViewer = {
+  userId: string;
+  commanders: CommanderSummary[];
+  suggestedDisplayName: string;
+};
+
+function readActiveCommanderId() {
+  return (window.localStorage.getItem(ACTIVE_COMMANDER_STORAGE_KEY) ?? "") as Id<"commanderProfiles"> | "";
+}
+
+function writeActiveCommanderId(commanderId: Id<"commanderProfiles"> | "") {
+  if (commanderId) {
+    window.localStorage.setItem(ACTIVE_COMMANDER_STORAGE_KEY, commanderId);
+    return;
+  }
+
+  window.localStorage.removeItem(ACTIVE_COMMANDER_STORAGE_KEY);
 }

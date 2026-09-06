@@ -64,56 +64,96 @@ button {
 
 .splash-screen {
   align-items: center;
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
+  background:
+    linear-gradient(180deg, rgba(3, 7, 6, 0.12), #030706 95%),
+    repeating-linear-gradient(0deg, rgba(36, 247, 167, 0.09) 0 1px, transparent 1px 9px),
+    linear-gradient(135deg, #030706 0%, #05110e 52%, #06291e 100%);
+  display: grid;
+  place-items: center;
   justify-content: center;
   overflow: hidden;
   padding: 32px;
   position: relative;
+  min-height: 100dvh;
+  width: 100%;
+  transition:
+    opacity 650ms ease,
+    transform 650ms ease;
 }
 
 .splash-screen::before,
 .splash-screen::after {
-  background: #24f7a7;
-  box-shadow: 0 0 30px rgba(36, 247, 167, 0.82);
   content: "";
-  height: 1px;
   position: absolute;
-  width: min(640px, 72vw);
+  pointer-events: none;
 }
 
 .splash-screen::before {
-  top: 30%;
+  background:
+    linear-gradient(90deg, transparent, rgba(36, 247, 167, 0.42), transparent),
+    linear-gradient(180deg, transparent 0 44%, rgba(36, 247, 167, 0.12) 44% 46%, transparent 46% 100%);
+  height: 100%;
+  left: 50%;
+  top: 0;
+  transform: translateX(-50%);
+  width: min(920px, 92vw);
+  z-index: 0;
 }
 
 .splash-screen::after {
-  bottom: 30%;
+  background:
+    linear-gradient(90deg, transparent, rgba(36, 247, 167, 0.74), transparent),
+    linear-gradient(90deg, transparent, rgba(242, 214, 107, 0.22), transparent);
+  box-shadow: 0 0 34px rgba(36, 247, 167, 0.55);
+  height: 1px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(760px, 78vw);
+  z-index: 1;
+}
+
+.splash-screen--fade {
+  opacity: 0;
+  transform: scale(1.018);
 }
 
 .splash-mark {
+  align-self: center;
+  isolation: isolate;
+  justify-self: center;
+  padding: 48px 24px;
+  position: relative;
   text-align: center;
-  text-shadow: 0 0 22px rgba(36, 247, 167, 0.45);
+  text-shadow: 0 0 34px rgba(36, 247, 167, 0.58);
+  width: min(92vw, 860px);
+  z-index: 2;
 }
 
 .splash-mark p {
-  color: #91fbd0;
+  color: #86ffd1;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 0.82rem;
+  font-size: clamp(0.72rem, 1.8vw, 0.82rem);
+  font-weight: 800;
   letter-spacing: 0.18em;
-  margin-bottom: 10px;
+  margin: 0;
   text-transform: uppercase;
 }
 
 .splash-mark h1 {
-  color: #f0fff9;
-  font-size: clamp(3.2rem, 8vw, 7.6rem);
-  line-height: 0.88;
+  color: #f2fff9;
+  font-size: clamp(3.2rem, 12vw, 8.7rem);
+  font-weight: 950;
+  line-height: 0.86;
   margin: 0;
+  text-transform: uppercase;
 }
 
-.splash-enter {
-  min-width: 160px;
+.splash-rule {
+  background: linear-gradient(90deg, transparent, #24f7a7, transparent);
+  height: 1px;
+  margin: 26px auto 16px;
+  width: min(400px, 70vw);
 }
 
 .app-screen,
@@ -171,7 +211,7 @@ button {
   padding: 7px 10px;
 }
 
-.commander-chip span,
+.commander-chip a,
 .room-chip {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 0.76rem;
@@ -254,6 +294,64 @@ button {
   box-shadow: 0 0 0 2px rgba(36, 247, 167, 0.15), 0 0 20px rgba(36, 247, 167, 0.22);
 }
 
+.field input[aria-invalid="true"] {
+  border-color: rgba(255, 91, 103, 0.84);
+  box-shadow: 0 0 0 2px rgba(255, 91, 103, 0.12), 0 0 18px rgba(255, 91, 103, 0.16);
+}
+
+.field-error {
+  color: #ff5b67;
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  margin: -2px 0 0;
+  text-transform: none;
+}
+
+.panel-copy {
+  color: #86d9be;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.commander-select-list {
+  display: grid;
+  gap: 8px;
+}
+
+.commander-select {
+  align-items: center;
+  background: rgba(2, 8, 7, 0.95);
+  border: 1px solid rgba(36, 247, 167, 0.28);
+  border-radius: 6px;
+  color: #d9fff4;
+  display: flex;
+  justify-content: space-between;
+  min-height: 44px;
+  padding: 9px 11px;
+  text-align: left;
+}
+
+.commander-select:hover,
+.commander-select--active {
+  border-color: #24f7a7;
+  box-shadow: inset 0 0 18px rgba(36, 247, 167, 0.08), 0 0 16px rgba(36, 247, 167, 0.14);
+}
+
+.commander-select span,
+.commander-select strong {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.commander-select strong {
+  color: #24f7a7;
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
 .button {
   align-items: center;
   background: rgba(5, 25, 20, 0.96);
@@ -280,6 +378,11 @@ button {
   box-shadow: 0 0 20px rgba(36, 247, 167, 0.22);
 }
 
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .button--primary {
   background: #24f7a7;
   border-color: #24f7a7;
@@ -290,6 +393,12 @@ button {
 .button--compact {
   min-height: 34px;
   padding: 0 12px;
+}
+
+.button--ghost {
+  background: transparent;
+  border-color: rgba(36, 247, 167, 0.22);
+  color: #74d9b9;
 }
 
 .lobby-grid {

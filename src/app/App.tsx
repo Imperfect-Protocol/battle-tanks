@@ -1,3 +1,4 @@
+import { useConvexAuth } from "@convex-dev/auth/react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { CommanderProvider, useCommander } from "./CommanderContext";
 import { BattlePage } from "../pages/BattlePage";
@@ -43,11 +44,27 @@ export default function App() {
 }
 
 function RequireCommander({ children }: { children: JSX.Element }) {
-  const { displayName } = useCommander();
+  const { isAuthenticated, isLoading } = useConvexAuth();
+  const { hasCommander, isLoadingProfile } = useCommander();
 
-  if (!displayName) {
+  if (isLoading || (isAuthenticated && isLoadingProfile)) {
+    return <AuthLoading />;
+  }
+
+  if (!isAuthenticated || !hasCommander) {
     return <Navigate to="/sign-in" replace />;
   }
 
   return children;
+}
+
+function AuthLoading() {
+  return (
+    <main className="screen centered-screen">
+      <div className="protocol-panel auth-panel">
+        <p className="eyebrow">Connecting</p>
+        <h1>Authorizing</h1>
+      </div>
+    </main>
+  );
 }

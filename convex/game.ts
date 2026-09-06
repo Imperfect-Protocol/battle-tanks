@@ -1,5 +1,6 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { getAuthUserId } from "@convex-dev/auth/server";
 
 const BOARD_SIZE = 12;
 const DEFAULT_LOBBY_ID = "pvp";
@@ -150,9 +151,14 @@ export const listBattles = query({
 });
 
 export const createRoom = mutation({
-  args: { roomCode: v.string(), playerName: v.string(), battleName: v.optional(v.string()) },
+  args: {
+    roomCode: v.string(),
+    commanderId: v.id("commanderProfiles"),
+    battleName: v.optional(v.string()),
+  },
   returns: v.id("matches"),
   handler: async (ctx, args) => {
+    const commander = await requireCommanderProfile(ctx, args.commanderId);
     const now = Date.now();
     const roomCode = normalizeRoom(args.roomCode);
     const existing = await ctx.db
@@ -178,7 +184,9 @@ export const createRoom = mutation({
     });
     const playerId = await ctx.db.insert("players", {
       matchId,
-      name: cleanName(args.playerName),
+      userId: commander.userId,
+      commanderId: commander.commanderId,
+      name: commander.displayName,
       slot: "alpha",
       score: 0,
       createdAt: now,
@@ -201,9 +209,10 @@ export const createRoom = mutation({
 });
 
 export const joinRoom = mutation({
-  args: { roomCode: v.string(), playerName: v.string() },
+  args: { roomCode: v.string(), commanderId: v.id("commanderProfiles") },
   returns: v.id("matches"),
   handler: async (ctx, args) => {
+    const commander = await requireCommanderProfile(ctx, args.commanderId);
     const now = Date.now();
     const roomCode = normalizeRoom(args.roomCode);
     const match = await ctx.db
@@ -220,8 +229,7 @@ export const joinRoom = mutation({
       .withIndex("by_match", (q) => q.eq("matchId", match._id))
       .collect();
 
-    const playerName = cleanName(args.playerName);
-    const existingPlayer = players.find((player) => player.name === playerName);
+    const existingPlayer = players.find((player) => player.commanderId === commander.commanderId);
     if (existingPlayer) {
       return match._id;
     }
@@ -233,7 +241,9 @@ export const joinRoom = mutation({
     const slot = players.some((player) => player.slot === "alpha") ? "bravo" : "alpha";
     const playerId = await ctx.db.insert("players", {
       matchId: match._id,
-      name: playerName,
+      userId: commander.userId,
+      commanderId: commander.commanderId,
+      name: commander.displayName,
       slot,
       score: 0,
       createdAt: now,
@@ -263,7 +273,7 @@ export const joinRoom = mutation({
 export const submitOrders = mutation({
   args: {
     roomCode: v.string(),
-    playerName: v.string(),
+    commanderId: v.id("commanderProfiles"),
     commands: v.array(v.string()),
   },
   returns: v.null(),
@@ -283,7 +293,8 @@ export const submitOrders = mutation({
       .query("players")
       .withIndex("by_match", (q) => q.eq("matchId", match._id))
       .collect();
-    const player = players.find((candidate) => candidate.name === cleanName(args.playerName));
+    const commander = await requireCommanderProfile(ctx, args.commanderId);
+    const player = players.find((candidate) => candidate.commanderId === commander.commanderId);
     if (!player) {
       throw new Error("Join the room before submitting orders");
     }
@@ -315,6 +326,11 @@ export const runNextTick = mutation({
   args: { roomCode: v.string() },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    if (!userId) {
+      throw new Error("Sign in before advancing battle");
+    }
+
     const now = Date.now();
     const roomCode = normalizeRoom(args.roomCode);
     const match = await ctx.db
@@ -332,6 +348,14 @@ export const runNextTick = mutation({
 
     const board = await ctx.db.get(match.boardId);
     if (!board) {
+      return null;
+    }
+
+    const players = await ctx.db
+      .query("players")
+      .withIndex("by_match", (q) => q.eq("matchId", match._id))
+      .collect();
+    if (!players.some((player) => player.userId === userId)) {
       return null;
     }
 
@@ -402,6 +426,25 @@ async function ensureDefaultBoard(ctx: any, now: number) {
     ],
     createdAt: now,
   });
+}
+
+async function requireCommanderProfile(ctx: any, commanderId: any) {
+  const userId = await getAuthUserId(ctx);
+  if (!userId) {
+    throw new Error("Sign in before entering battle");
+  }
+
+  const profile = await ctx.db.get(commanderId);
+
+  if (!profile || profile.userId !== userId) {
+    throw new Error("Choose a commander name before entering battle");
+  }
+
+  return {
+    commanderId: profile._id,
+    userId,
+    displayName: profile.displayName,
+  };
 }
 
 async function applyCommand(ctx: any, board: any, tanks: any[], tank: any, command: string | undefined, now: number) {
@@ -557,10 +600,6 @@ function normalizeRoom(roomCode: string) {
 
 function normalizeLobbyId(lobbyId: string | undefined) {
   return lobbyId?.trim().toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 24) || DEFAULT_LOBBY_ID;
-}
-
-function cleanName(name: string) {
-  return name.trim().slice(0, 32) || "Commander";
 }
 
 function cleanBattleName(name: string | undefined) {

@@ -11,7 +11,10 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "@auth/core": "^0.41.1",
+    "@convex-dev/auth": "^0.0.95",
     "convex": "1.45.0",
+    "jose": "^6.2.12",
     "react": "^18.0.0",
     "react-dom": "^18.0.0",
     "react-router-dom": "^6.30.6"

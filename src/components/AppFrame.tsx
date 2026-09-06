@@ -9,18 +9,18 @@ type AppFrameProps = {
 };
 
 export function AppFrame({ children, eyebrow, title }: AppFrameProps) {
-  const { displayName, clearDisplayName } = useCommander();
+  const { displayName, signOutCommander } = useCommander();
 
   return (
     <main className="screen app-screen">
       <header className="app-header">
-        <Link className="brand-lockup" to="/lobbies">
+        <Link className="brand-lockup" to="/">
           <span>BATTLE TANKS</span>
           <strong>Imperfect Protocol</strong>
         </Link>
         <div className="commander-chip">
-          <span>{displayName}</span>
-          <button type="button" onClick={clearDisplayName}>
+          <Link to="/sign-in">{displayName}</Link>
+          <button type="button" onClick={signOutCommander}>
             Sign Out
           </button>
         </div>
