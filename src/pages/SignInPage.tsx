@@ -15,6 +15,7 @@ export function SignInPage() {
   const [searchParams] = useSearchParams();
   const { isAuthenticated, isLoading } = useConvexAuth();
   const { signIn } = useAuthActions();
+  const urlResetCode = searchParams.get("code") ?? "";
   const {
     commanders,
     commanderId,
@@ -26,8 +27,14 @@ export function SignInPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
-  const [resetCode, setResetCode] = useState(searchParams.get("code") ?? "");
-  const [authMode, setAuthMode] = useState<AuthMode>(location.pathname === "/reset-password" ? "reset" : "signIn");
+  const [resetCode, setResetCode] = useState(urlResetCode);
+  const [authMode, setAuthMode] = useState<AuthMode>(
+    location.pathname === "/reset-password" && urlResetCode
+      ? "reset"
+      : location.pathname === "/reset-password"
+        ? "forgot"
+        : "signIn",
+  );
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
   const [nameError, setNameError] = useState("");
@@ -37,8 +44,18 @@ export function SignInPage() {
     api.profiles.isDisplayNameTaken,
     cleanedName ? { displayName: cleanedName } : "skip",
   );
+  const isResetCodeValid = useQuery(
+    api.authCodes.isValidPasswordResetCode,
+    resetCode ? { code: resetCode } : "skip",
+  );
   const isNameTakenByThisAccount = commanders.some((commander) => commander.displayName === cleanedName);
   const showNameTaken = Boolean(cleanedName && (isNameTakenByOtherAccount || isNameTakenByThisAccount));
+
+  useEffect(() => {
+    if (isAuthenticated && location.pathname === "/reset-password") {
+      navigate("/sign-in", { replace: true });
+    }
+  }, [isAuthenticated, location.pathname, navigate]);
 
   useEffect(() => {
     if (!showNameTaken) {
@@ -53,6 +70,14 @@ export function SignInPage() {
 
     const emailFromUrl = searchParams.get("email") ?? "";
     const codeFromUrl = searchParams.get("code") ?? "";
+
+    if (!codeFromUrl) {
+      setAuthMode("forgot");
+      setAuthNotice("");
+      setAuthError("Invalid or expired reset link.");
+      return;
+    }
+
     setAuthMode("reset");
     if (emailFromUrl) {
       setEmail(emailFromUrl);
@@ -112,7 +137,8 @@ export function SignInPage() {
       .then(() => {
         setNewPassword("");
         setResetCode("");
-        setAuthNotice("Password reset complete.");
+        setAuthMode("signIn");
+        navigate("/sign-in", { replace: true });
       })
       .catch(showAuthError);
   };
@@ -252,11 +278,28 @@ export function SignInPage() {
               </button>
             </form>
           ) : null}
-          {authMode === "reset" ? (
+          {authMode === "reset" && isResetCodeValid === undefined ? (
+            <>
+              <p className="eyebrow">Password Recovery</p>
+              <h1>Checking Link</h1>
+              <p className="panel-copy">Verifying your reset link.</p>
+            </>
+          ) : null}
+          {authMode === "reset" && isResetCodeValid === false ? (
+            <div className="auth-form">
+              <p className="eyebrow">Password Recovery</p>
+              <h1>Code Used</h1>
+              <p className="panel-copy">This reset code has already been used.</p>
+              <button className="button button--primary" type="button" onClick={showSignIn}>
+                Back to Sign In
+              </button>
+            </div>
+          ) : null}
+          {authMode === "reset" && isResetCodeValid === true ? (
             <form className="auth-form" onSubmit={submitPasswordReset}>
               <p className="eyebrow">Password Recovery</p>
               <h1>Reset Password</h1>
-              <p className="panel-copy">Paste the reset code from your email link and choose a new password.</p>
+              <p className="panel-copy">Choose a new password for this account.</p>
               <label className="field">
                 <span>Email</span>
                 <input
@@ -266,15 +309,6 @@ export function SignInPage() {
                   onChange={(event) => setEmail(event.target.value)}
                   placeholder="commander@example.com"
                   type="email"
-                />
-              </label>
-              <label className="field">
-                <span>Reset Code</span>
-                <input
-                  autoComplete="one-time-code"
-                  value={resetCode}
-                  onChange={(event) => setResetCode(event.target.value)}
-                  placeholder="CODE"
                 />
               </label>
               <label className="field">
