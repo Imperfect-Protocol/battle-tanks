@@ -21,7 +21,7 @@ export function BattlePage() {
   const { gameRoom, createRoom, joinRoom, submitScript, runNextTick } = useGameRoom(cleanRoomCode);
   const tankByPlayer = useMemo(() => new Map(gameRoom?.tanks.map((tank) => [tank.playerId, tank]) ?? []), [gameRoom]);
   const localPlayer = gameRoom?.players.find((player) => player.commanderId === commanderId);
-  const ownsClock = localPlayer?.slot === "alpha";
+  const ownsClock = Boolean(localPlayer);
   const roomExists = Boolean(gameRoom?.match);
   const hasJoinedRoom = Boolean(localPlayer);
   const isCreateRoute = searchParams.get("create") === "1";
