@@ -316,6 +316,22 @@ button {
   margin: 0;
 }
 
+.auth-divider {
+  color: #5fcaa8;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.18em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.auth-actions {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .commander-select-list {
   display: grid;
   gap: 8px;

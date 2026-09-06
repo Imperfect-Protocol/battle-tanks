@@ -13,19 +13,26 @@ npm run dev
 
 `npm run dev` starts Convex and Vite together after the app is connected to a Convex project.
 
-## OAuth
+## Auth
 
-The app uses Convex Auth with Google OAuth. Local auth keys and `SITE_URL` are set on the local Convex deployment.
+The app uses Convex Auth with only two sign-in methods enabled:
 
-Create Google OAuth credentials with this local redirect URI:
+- GitHub OAuth
+- Email and password
+
+Local Convex Auth keys and `SITE_URL` are set on the local Convex deployment.
+
+Create GitHub OAuth credentials with this local callback URL:
 
 ```txt
-http://127.0.0.1:3211/api/auth/callback/google
+http://127.0.0.1:3211/api/auth/callback/github
 ```
 
-Then set the Google credentials in Convex:
+Then set the GitHub credentials in Convex:
 
 ```sh
-npx convex env set AUTH_GOOGLE_ID=<google-client-id>
-npx convex env set AUTH_GOOGLE_SECRET=<google-client-secret>
+npx convex env set AUTH_GITHUB_ID=<github-client-id>
+npx convex env set AUTH_GITHUB_SECRET=<github-client-secret>
 ```
+
+Password sign-in does not need an external OAuth client.

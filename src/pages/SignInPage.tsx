@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
-import { useAuthActions, useConvexAuth } from "@convex-dev/auth/react";
 import { useMutation, useQuery } from "convex/react";
+import { useAuthActions, useConvexAuth } from "@convex-dev/auth/react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -19,6 +19,8 @@ export function SignInPage() {
     signOutCommander,
   } = useCommander();
   const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [authError, setAuthError] = useState("");
   const [nameError, setNameError] = useState("");
   const cleanedName = cleanDisplayName(name);
@@ -42,11 +44,22 @@ export function SignInPage() {
     }
   }, [showNameTaken]);
 
-  const signInWithGoogle = () => {
+  const signInWithGitHub = () => {
     setAuthError("");
-    void signIn("google", { redirectTo: "/sign-in" }).catch(() => {
+    void signIn("github", { redirectTo: "/sign-in" }).catch(() => {
       setAuthError("OAuth sign-in could not start");
     });
+  };
+
+  const submitPassword = (flow: "signIn" | "signUp") => {
+    setAuthError("");
+    void signIn("password", { flow, email, password })
+      .then(() => {
+        setPassword("");
+      })
+      .catch((error) => {
+        setAuthError(error instanceof Error ? error.message : "Password authentication failed");
+      });
   };
 
   const selectCommander = (nextCommanderId: Id<"commanderProfiles">) => {
@@ -92,10 +105,50 @@ export function SignInPage() {
         <section className="protocol-panel sign-in-panel auth-panel">
           <p className="eyebrow">OAuth Required</p>
           <h1>Sign In</h1>
-          <p className="panel-copy">Connect an OAuth account before entering the public battle network.</p>
-          <button className="button button--primary" type="button" onClick={signInWithGoogle}>
-            Continue with Google
+          <p className="panel-copy">Connect with GitHub, or use email and password before entering the public battle network.</p>
+          <button className="button button--primary" type="button" onClick={signInWithGitHub}>
+            Continue with GitHub
           </button>
+          <div className="auth-divider">or</div>
+          <label className="field">
+            <span>Email</span>
+            <input
+              autoComplete="email"
+              inputMode="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="commander@example.com"
+              type="email"
+            />
+          </label>
+          <label className="field">
+            <span>Password</span>
+            <input
+              autoComplete="current-password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="8+ characters"
+              type="password"
+            />
+          </label>
+          <div className="auth-actions">
+            <button
+              className="button button--primary"
+              disabled={!email || !password}
+              type="button"
+              onClick={() => submitPassword("signIn")}
+            >
+              Sign In
+            </button>
+            <button
+              className="button button--ghost"
+              disabled={!email || !password}
+              type="button"
+              onClick={() => submitPassword("signUp")}
+            >
+              Create Account
+            </button>
+          </div>
           {authError ? <p className="field-error">{authError}</p> : null}
         </section>
       </main>
