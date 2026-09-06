@@ -1,0 +1,27 @@
+{
+  "name": "battle-tanks",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "convex dev --start 'vite --host 127.0.0.1'",
+    "dev:vite": "vite --host 127.0.0.1",
+    "dev:convex": "convex dev",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "convex": "1.45.0",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "react-router-dom": "^6.30.6"
+  },
+  "devDependencies": {
+    "@types/node": "^18.17.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "@vitejs/plugin-react": "^4.2.1",
+    "typescript": "~5.0.3",
+    "vite": "^6.4.3"
+  }
+}
