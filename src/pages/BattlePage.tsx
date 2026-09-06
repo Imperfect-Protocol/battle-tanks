@@ -7,7 +7,7 @@ import { useGameRoom } from "../hooks/useGameRoom";
 
 const GAME_TICK_MS = 40;
 const GAME_OVER_DELAY_MS = 3000;
-const HELP_TEXT = "COMMANDS: bear <0-360>, aim <0-360> <10-60>, move <squares>, fire <10-100>";
+const HELP_TEXT = "COMMANDS: bear/b <0-360>, move/m <-100..100>, aim/a <0-360>, elev/e <10-60>, pow/p <10-100>, fire/f";
 
 export function BattlePage() {
   const navigate = useNavigate();
@@ -241,7 +241,8 @@ function describeCommand(command: string) {
 }
 
 function describeSingleCommand(command: string) {
-  const [action, rawAmount, rawSecondAmount] = command.trim().toLowerCase().replace(/\s+/g, " ").split(" ");
+  const [rawAction, rawAmount] = command.trim().toLowerCase().replace(/\s+/g, " ").split(" ");
+  const action = expandCommandAction(rawAction);
   const amount = Number(rawAmount);
 
   if (action === "bear" && Number.isFinite(amount)) {
@@ -249,22 +250,47 @@ function describeSingleCommand(command: string) {
   }
 
   if (action === "aim" && Number.isFinite(amount)) {
-    const elevation = Number(rawSecondAmount);
-    if (Number.isFinite(elevation)) {
-      return `Aim ${amount} degrees at ${elevation} degrees elevation`;
-    }
+    return `Aim ${amount} degrees`;
+  }
+
+  if (action === "elev" && Number.isFinite(amount)) {
+    return `Elevation ${amount} degrees`;
+  }
+
+  if (action === "pow" && Number.isFinite(amount)) {
+    return `Power ${amount}%`;
   }
 
   if (action === "move" && Number.isFinite(amount)) {
-    return `Move ${amount} squares`;
+    const squares = Math.abs(amount) / 10;
+    return `Move ${squares} squares ${amount < 0 ? "backward" : "forward"}`;
   }
 
   if (action === "fire") {
-    const power = Number(rawAmount);
-    if (Number.isFinite(power)) {
-      return `Fire ${power}% power`;
-    }
+    return "Fire";
   }
 
   return "Accepted";
+}
+
+function expandCommandAction(action: string | undefined) {
+  if (action === "b") {
+    return "bear";
+  }
+  if (action === "m") {
+    return "move";
+  }
+  if (action === "a") {
+    return "aim";
+  }
+  if (action === "e") {
+    return "elev";
+  }
+  if (action === "p") {
+    return "pow";
+  }
+  if (action === "f") {
+    return "fire";
+  }
+  return action;
 }

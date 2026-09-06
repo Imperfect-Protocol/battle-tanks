@@ -43,6 +43,7 @@ export type TankRecord = {
   turretDirection: number | LegacyDirection;
   turretLocked?: boolean;
   launchAngle?: number;
+  cannonPower?: number;
   lastFirePower?: number;
   tankSpec?: TankSpecRecord;
   ammoType: AmmoType;

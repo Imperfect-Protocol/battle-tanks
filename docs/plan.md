@@ -24,39 +24,45 @@
 ## Commands
 
  - bear <0-360 absolute bearing angle, 0 up/North, 90 right/East, 180 down/South, 270 left/West>
- - aim <0-360 absolute aiming angle, 0 up/North, 90 right/East, 180 down/South, 270 left/West> <10-60 vertical angle>
- - move < number of squares to move>
- - fire <10-100 power, value above 100 shoud print error>
+ - move <-100..100 command units, 10 command units per square; negative values move backward>
+ - aim <0-360 absolute aiming angle, 0 up/North, 90 right/East, 180 down/South, 270 left/West>
+ - elev <10-60 vertical angle>
+ - pow <10-100 cannon power, value above 100 should print error>
+ - fire
+ - single-letter aliases: b, m, a, e, p, f
 
 Values out of range should print error
 
  
  ## Moving
 
- move should adhere to law of physics, tank have constant acceleration and speed is capped at maximum speed of 3 squares per second,
- when moving X squares tank should accelerate in current direction of its hull, and at some point should:
+ move should adhere to law of physics, tank have constant acceleration and speed is capped at maximum speed of 3 squares per second.
+ Move commands use 10 command units per square, so `move 50` means 5 squares and `move -30` means 3 squares backward.
+ When moving X squares tank should accelerate in current direction of its hull, and at some point should:
  - decelerate if there is no queued move commands
  - continue moving if there is queued move commands
 
 Example
 
 bear 90
-move 5
+move 50
 bear 180
-move 3
-aim 200 30
-fire 100
+move -30
+aim 200
+elev 30
+pow 100
+fire
 
-Here command queue has "move 5" and "move 3", so acceleration and deceleration should be computed using total distance of 5+3=8.
+Here command queue has "move 50" and "move -30", so acceleration and deceleration should be computed using the signed remaining distance.
 Tank should start decelerating soon enough to reach 0 at destination point.
 
-If user queues another move command, say "move 3" then algorithm needs to add that to remaining distance, e.g.
+If user queues another move command, say "move 30" then algorithm needs to add that to remaining distance, e.g.
 
-move 5 + move 3 = move 8
+move 50 + move 30 = move 80
 
 already moved 7 ==> then remaining is 8 - 7 = 1
 
-so queueing "move 3" should add 3: 1 + 3 = 4
+so queueing "move 30" should add 3 squares: 1 + 3 = 4
 
 tank should accelerate to reach destination at 4 squares.
 
@@ -74,7 +80,7 @@ It should be exact location where projectile will hit the ground.
 Projectile velocity needs to be calculated taking into account current tank velocity.
 When tank is stopped projectile maximum velocity should be 6 squares per second.
 
-Use either 50% of power or last used fire power to compute distance.
+Use current cannon power, defaulting to 50% if the tank has no power setting yet, to compute distance.
 
 ## Targeting
 
@@ -110,4 +116,3 @@ Settings - should open settings page
 - Panel where user can see list of their commander, and button to switch which goes into commander selection screen
 - Panel where user can click a button "Reset Password" which goes into reset password dialog
 - Panel where user can configure MCP so they can connect their AI agent
-

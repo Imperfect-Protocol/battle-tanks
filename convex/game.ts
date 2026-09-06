@@ -25,8 +25,9 @@ const MIN_FIRE_POWER = 10;
 const MAX_FIRE_POWER = 100;
 const MIN_AIM_ELEVATION_DEGREES = 10;
 const MAX_AIM_ELEVATION_DEGREES = 60;
-const MIN_MOVE_SQUARES = 0.1;
-const MAX_MOVE_SQUARES = 20;
+const MOVE_COMMAND_UNITS_PER_SQUARE = 10;
+const MAX_MOVE_COMMAND_UNITS = 100;
+const MAX_MOVE_DISTANCE_UNITS = (MAX_MOVE_COMMAND_UNITS / MOVE_COMMAND_UNITS_PER_SQUARE) * UNITS_PER_SQUARE;
 const MAX_PROJECTILE_DAMAGE = 35;
 const MIN_PROJECTILE_DAMAGE = 4;
 const COLLISION_DAMAGE_PER_SPEED = 0.18;
@@ -57,9 +58,11 @@ const TURRET_SIZES = [0.76, 0.84, 0.92, 1, 1.06];
 
 type StoredCommand =
   | { action: "bear"; bearing: number }
-  | { action: "move"; squares: number }
-  | { action: "aim"; bearing: number; elevation: number }
-  | { action: "fire"; power: number };
+  | { action: "move"; units: number }
+  | { action: "aim"; bearing: number }
+  | { action: "elev"; elevation: number }
+  | { action: "pow"; power: number }
+  | { action: "fire" };
 
 type CollisionDetails =
   | { type: "none"; position: { x: number; y: number } }
@@ -228,6 +231,7 @@ export const createRoom = mutation({
       tankSpec: commander.tankSpec,
       ammoType: "missile",
       launchAngle: DEFAULT_FIRE_ANGLE_DEGREES,
+      cannonPower: DEFAULT_FIRE_POWER,
       lastFirePower: DEFAULT_FIRE_POWER,
       health: MAX_HEALTH,
       updatedAt: now,
@@ -294,6 +298,7 @@ export const joinRoom = mutation({
       tankSpec: commander.tankSpec,
       ammoType: "missile",
       launchAngle: DEFAULT_FIRE_ANGLE_DEGREES,
+      cannonPower: DEFAULT_FIRE_POWER,
       lastFirePower: DEFAULT_FIRE_POWER,
       health: MAX_HEALTH,
       updatedAt: now,
@@ -355,11 +360,11 @@ export const submitOrders = mutation({
       commands.push(...normalizedCommands);
     }
 
-    const activeMoveRemaining = clampFinite(tank.moveRemaining, 0, MAX_MOVE_SQUARES * UNITS_PER_SQUARE * 4, 0);
-    if (activeMoveRemaining > 0 && commands.every((command) => command.startsWith("move "))) {
+    const activeMoveRemaining = clampFinite(tank.moveRemaining, -MAX_MOVE_DISTANCE_UNITS * 4, MAX_MOVE_DISTANCE_UNITS * 4, 0);
+    if (Math.abs(activeMoveRemaining) > 0.5 && commands.every((command) => command.startsWith("move "))) {
       const extraDistance = commands.reduce((total, command) => {
         const parsed = parseStoredCommand(command);
-        return parsed?.action === "move" ? total + parsed.squares * UNITS_PER_SQUARE : total;
+        return parsed?.action === "move" ? total + moveCommandUnitsToDistance(parsed.units) : total;
       }, 0);
       await ctx.db.patch(tank._id, {
         moveRemaining: activeMoveRemaining + extraDistance,
@@ -569,15 +574,31 @@ async function applyCommand(
     const result = stepTowardBearing(angleFromDirection(tank.turretDirection), parsed.bearing);
     await ctx.db.patch(tank._id, {
       turretDirection: result.bearing,
-      launchAngle: parsed.elevation,
       updatedAt: now,
     });
     return result.complete;
   }
 
+  if (parsed.action === "elev") {
+    await ctx.db.patch(tank._id, {
+      launchAngle: parsed.elevation,
+      updatedAt: now,
+    });
+    return true;
+  }
+
+  if (parsed.action === "pow") {
+    await ctx.db.patch(tank._id, {
+      cannonPower: parsed.power,
+      lastFirePower: parsed.power,
+      updatedAt: now,
+    });
+    return true;
+  }
+
   if (parsed.action === "move") {
-    const remaining = clampFinite(tank.moveRemaining, 0, MAX_MOVE_SQUARES * UNITS_PER_SQUARE, 0);
-    if (tank.activeMoveCommand === commandKey && remaining <= 0.5) {
+    const remaining = clampFinite(tank.moveRemaining, -MAX_MOVE_DISTANCE_UNITS * 4, MAX_MOVE_DISTANCE_UNITS * 4, 0);
+    if (tank.activeMoveCommand === commandKey && Math.abs(remaining) <= 0.5) {
       await ctx.db.patch(tank._id, {
         speed: 0,
         velocity: { x: 0, y: 0 },
@@ -589,7 +610,7 @@ async function applyCommand(
     if (tank.activeMoveCommand !== commandKey) {
       await ctx.db.patch(tank._id, {
         activeMoveCommand: commandKey ?? command,
-        moveRemaining: remaining + parsed.squares * UNITS_PER_SQUARE,
+        moveRemaining: remaining + moveCommandUnitsToDistance(parsed.units),
         updatedAt: now,
       });
     }
@@ -597,7 +618,8 @@ async function applyCommand(
   }
 
   if (parsed.action === "fire") {
-    const launch = launchVelocity(parsed.power, tank.launchAngle ?? DEFAULT_FIRE_ANGLE_DEGREES);
+    const power = clampFinite(tank.cannonPower ?? tank.lastFirePower, MIN_FIRE_POWER, MAX_FIRE_POWER, DEFAULT_FIRE_POWER);
+    const launch = launchVelocity(power, tank.launchAngle ?? DEFAULT_FIRE_ANGLE_DEGREES);
     const muzzleVelocity = vectorFromBearing(angleFromDirection(tank.turretDirection), launch.horizontal);
     const velocity = addVectors(muzzleVelocity, tank.velocity ?? { x: 0, y: 0 });
     const tankSpec = normalizeTankSpec(tank.tankSpec);
@@ -621,13 +643,13 @@ async function applyCommand(
       damage: MAX_PROJECTILE_DAMAGE,
       height: 0,
       verticalVelocity: launch.vertical,
-      launchPower: parsed.power,
+      launchPower: power,
       launchAngle: tank.launchAngle ?? DEFAULT_FIRE_ANGLE_DEGREES,
       status: "active",
       createdAt: now,
       updatedAt: now,
     });
-    await ctx.db.patch(tank._id, { lastFirePower: parsed.power, updatedAt: now });
+    await ctx.db.patch(tank._id, { lastFirePower: power, updatedAt: now });
     return true;
   }
 
@@ -717,18 +739,22 @@ async function advanceTankMotion(ctx: any, board: any, tanks: any[], tank: any, 
     return false;
   }
 
-  const moveRemaining = clampFinite(tank.moveRemaining, 0, MAX_MOVE_SQUARES * UNITS_PER_SQUARE * 4, 0);
+  const moveRemaining = clampFinite(tank.moveRemaining, -MAX_MOVE_DISTANCE_UNITS * 4, MAX_MOVE_DISTANCE_UNITS * 4, 0);
   const currentSpeed = vectorLength(tank.velocity ?? { x: 0, y: 0 });
-  if (moveRemaining <= 0.5 && currentSpeed <= 0.5) {
+  const remainingMagnitude = Math.abs(moveRemaining);
+  if (remainingMagnitude <= 0.5 && currentSpeed <= 0.5) {
     return false;
   }
 
-  const nextSpeed = nextMovementSpeed(currentSpeed, moveRemaining);
-  const velocity = vectorFromBearing(angleFromDirection(tank.hullDirection), nextSpeed);
-  const travelDistance = Math.min(nextSpeed, moveRemaining);
+  const nextSpeed = nextMovementSpeed(currentSpeed, remainingMagnitude);
+  const moveSign = moveRemaining < 0 ? -1 : 1;
+  const velocity = vectorFromBearing(angleFromDirection(tank.hullDirection), nextSpeed * moveSign);
+  const travelDistance = Math.min(nextSpeed, remainingMagnitude);
+  const nextMoveRemaining = moveRemaining - moveSign * travelDistance;
+  const travelVector = normalizedVector(velocity, { x: 0, y: -1 });
   const desiredPosition = {
-    x: tank.position.x + normalizedVector(velocity, { x: 0, y: -1 }).x * travelDistance,
-    y: tank.position.y + normalizedVector(velocity, { x: 0, y: -1 }).y * travelDistance,
+    x: tank.position.x + travelVector.x * travelDistance,
+    y: tank.position.y + travelVector.y * travelDistance,
   };
   const move = resolveTankMove(desiredPosition, board, tanks, tank, velocity);
 
@@ -737,7 +763,7 @@ async function advanceTankMotion(ctx: any, board: any, tanks: any[], tank: any, 
       position: move.position,
       velocity,
       speed: vectorLength(velocity),
-      moveRemaining: Math.max(0, moveRemaining - travelDistance),
+      moveRemaining: Math.abs(nextMoveRemaining) <= 0.5 ? 0 : nextMoveRemaining,
       updatedAt: now,
     });
     return false;
@@ -749,7 +775,7 @@ async function advanceTankMotion(ctx: any, board: any, tanks: any[], tank: any, 
       position: move.position,
       velocity,
       speed: vectorLength(velocity),
-      moveRemaining: Math.max(0, moveRemaining - travelDistance),
+      moveRemaining: Math.abs(nextMoveRemaining) <= 0.5 ? 0 : nextMoveRemaining,
       updatedAt: now,
     });
     return false;
@@ -763,7 +789,7 @@ async function advanceTankMotion(ctx: any, board: any, tanks: any[], tank: any, 
     position: reboundPosition,
     velocity: reboundVelocity,
     speed: vectorLength(reboundVelocity),
-    moveRemaining: Math.max(0, moveRemaining - travelDistance),
+    moveRemaining: Math.abs(nextMoveRemaining) <= 0.5 ? 0 : nextMoveRemaining,
     health: movingHealth,
     updatedAt: now,
   });
@@ -811,7 +837,8 @@ function normalizeOrderCommand(command: string): string[] {
 }
 
 function parseStoredCommand(command: string): StoredCommand | null {
-  const [action, rawAmount, rawSecondAmount, extra] = command.trim().toLowerCase().replace(/\s+/g, " ").split(" ");
+  const [rawAction, rawAmount, rawSecondAmount, extra] = command.trim().toLowerCase().replace(/\s+/g, " ").split(" ");
+  const action = expandCommandAction(rawAction);
   if (extra !== undefined) {
     return null;
   }
@@ -826,29 +853,33 @@ function parseStoredCommand(command: string): StoredCommand | null {
   }
 
   if (action === "move") {
-    const squares = strictNumber(rawAmount, MIN_MOVE_SQUARES, MAX_MOVE_SQUARES);
-    if (squares === null || rawSecondAmount !== undefined) {
+    const units = strictNumber(rawAmount, -MAX_MOVE_COMMAND_UNITS, MAX_MOVE_COMMAND_UNITS);
+    if (units === null || rawSecondAmount !== undefined) {
       return null;
     }
 
-    return { action, squares: roundForStorage(squares) };
+    return { action, units: roundForStorage(units) };
   }
 
   if (action === "aim") {
     const bearing = strictNumber(rawAmount, 0, 360);
-    const elevation = strictNumber(rawSecondAmount, MIN_AIM_ELEVATION_DEGREES, MAX_AIM_ELEVATION_DEGREES);
-    if (bearing === null || elevation === null) {
+    if (bearing === null || rawSecondAmount !== undefined) {
       return null;
     }
 
-    return {
-      action,
-      bearing: roundForStorage(normalizeDegrees(bearing)),
-      elevation: roundForStorage(elevation),
-    };
+    return { action, bearing: roundForStorage(normalizeDegrees(bearing)) };
   }
 
-  if (action === "fire") {
+  if (action === "elev") {
+    const elevation = strictNumber(rawAmount, MIN_AIM_ELEVATION_DEGREES, MAX_AIM_ELEVATION_DEGREES);
+    if (elevation === null || rawSecondAmount !== undefined) {
+      return null;
+    }
+
+    return { action, elevation: roundForStorage(elevation) };
+  }
+
+  if (action === "pow") {
     const power = strictNumber(rawAmount, MIN_FIRE_POWER, MAX_FIRE_POWER);
     if (power === null || rawSecondAmount !== undefined) {
       return null;
@@ -857,7 +888,37 @@ function parseStoredCommand(command: string): StoredCommand | null {
     return { action, power: roundForStorage(power) };
   }
 
+  if (action === "fire") {
+    if (rawAmount !== undefined || rawSecondAmount !== undefined) {
+      return null;
+    }
+
+    return { action };
+  }
+
   return null;
+}
+
+function expandCommandAction(action: string | undefined) {
+  if (action === "b") {
+    return "bear";
+  }
+  if (action === "m") {
+    return "move";
+  }
+  if (action === "a") {
+    return "aim";
+  }
+  if (action === "e") {
+    return "elev";
+  }
+  if (action === "p") {
+    return "pow";
+  }
+  if (action === "f") {
+    return "fire";
+  }
+  return action;
 }
 
 function serializeCommand(command: StoredCommand) {
@@ -865,12 +926,18 @@ function serializeCommand(command: StoredCommand) {
     return `bear ${roundForStorage(command.bearing)}`;
   }
   if (command.action === "move") {
-    return `move ${roundForStorage(command.squares)}`;
+    return `move ${roundForStorage(command.units)}`;
   }
   if (command.action === "aim") {
-    return `aim ${roundForStorage(command.bearing)} ${roundForStorage(command.elevation)}`;
+    return `aim ${roundForStorage(command.bearing)}`;
   }
-  return `fire ${roundForStorage(command.power)}`;
+  if (command.action === "elev") {
+    return `elev ${roundForStorage(command.elevation)}`;
+  }
+  if (command.action === "pow") {
+    return `pow ${roundForStorage(command.power)}`;
+  }
+  return "fire";
 }
 
 function strictNumber(rawAmount: string | undefined, min: number, max: number) {
@@ -891,6 +958,10 @@ function vectorFromBearing(degrees: number, magnitude: number) {
     x: Math.cos(radians) * magnitude,
     y: Math.sin(radians) * magnitude,
   };
+}
+
+function moveCommandUnitsToDistance(units: number) {
+  return (units / MOVE_COMMAND_UNITS_PER_SQUARE) * UNITS_PER_SQUARE;
 }
 
 async function patchHullBearing(ctx: any, tank: any, hullDirection: number, now: number) {

@@ -7,6 +7,7 @@ const CANNON_WIDTH_PX = 4;
 const PROJECTILE_CAMERA_HEIGHT_UNITS = 16000;
 const MAX_PROJECTILE_SIZE_PX = 18;
 const DEFAULT_BOARD_SIZE = 12;
+const GAME_TICK_MS = 40;
 
 type BattleBoardProps = {
   gameRoom: GameRoom | null;
@@ -16,8 +17,9 @@ type BattleBoardProps = {
 export function BattleBoard({ gameRoom, localPlayerId = null }: BattleBoardProps) {
   const boardSize = gameRoom?.board?.size ?? DEFAULT_BOARD_SIZE;
   const walls = useMemo(() => gameRoom?.board?.walls ?? defaultWalls(boardSize), [gameRoom?.board, boardSize]);
+  const [frameNow, setFrameNow] = useState(Date.now());
   const localTank = gameRoom?.tanks.find((tank) => tank.playerId === localPlayerId && tank.alive);
-  const aimImpact = localTank ? predictProjectileImpact(localTank, boardSize, localTank.record.lastFirePower ?? 50) : null;
+  const aimImpact = localTank ? predictProjectileImpact(localTank, boardSize, frameNow, localTank.record.cannonPower ?? localTank.record.lastFirePower ?? 50) : null;
   const targetMarkers = localTank && aimImpact
     ? gameRoom?.tanks
       .filter((tank) => tank.playerId !== localPlayerId && tank.alive)
@@ -25,32 +27,35 @@ export function BattleBoard({ gameRoom, localPlayerId = null }: BattleBoardProps
         id: tank.id,
         color: normalizeTankSpec(localTank.record.tankSpec).hullColor,
         position: clampBoardPoint({
-          x: tank.position.x + tank.velocity.x * aimImpact.flightTicks,
-          y: tank.position.y + tank.velocity.y * aimImpact.flightTicks,
+          x: observedTankPosition(tank, frameNow, boardSize).x + tank.velocity.x * aimImpact.flightTicks,
+          y: observedTankPosition(tank, frameNow, boardSize).y + tank.velocity.y * aimImpact.flightTicks,
         }, boardSize),
       })) ?? []
     : [];
-  const [now, setNow] = useState(Date.now());
   const projectiles = useMemo(
     () =>
       gameRoom?.projectiles.filter(
         (projectile) =>
           projectile.record.status !== "exploding" ||
           projectile.record.explosionEndsAt === undefined ||
-          projectile.record.explosionEndsAt > now,
+          projectile.record.explosionEndsAt > frameNow,
       ) ?? [],
-    [gameRoom?.projectiles, now],
+    [gameRoom?.projectiles, frameNow],
   );
 
   useEffect(() => {
-    const hasExplosions = gameRoom?.projectiles.some((projectile) => projectile.record.status === "exploding");
-    if (!hasExplosions) {
+    if (!gameRoom) {
       return;
     }
 
-    const timer = window.setInterval(() => setNow(Date.now()), 80);
-    return () => window.clearInterval(timer);
-  }, [gameRoom?.projectiles]);
+    let frameId = 0;
+    const tick = () => {
+      setFrameNow(Date.now());
+      frameId = window.requestAnimationFrame(tick);
+    };
+    frameId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [gameRoom]);
 
   return (
     <div className="arena" style={{ "--cells": boardSize } as React.CSSProperties}>
@@ -193,7 +198,7 @@ function projectileStyle(x: number, y: number, height: number, boardSize: number
   } as React.CSSProperties;
 }
 
-function predictProjectileImpact(tank: Tank, boardSize: number, power: number) {
+function predictProjectileImpact(tank: Tank, boardSize: number, now: number, power: number) {
   const tankSpec = normalizeTankSpec(tank.record.tankSpec);
   const launch = launchVelocity(power, tank.record.launchAngle ?? 45);
   const muzzleVelocity = vectorFromBearing(angleFromDirection(tank.record.turretDirection), launch.horizontal);
@@ -209,9 +214,10 @@ function predictProjectileImpact(tank: Tank, boardSize: number, power: number) {
     angleFromDirection(tank.record.turretDirection),
     (tankSpec.turretSize * 620) / 2 + tankSpec.cannonLength * 1180,
   );
+  const tankPosition = observedTankPosition(tank, now, boardSize);
   const muzzle = {
-    x: tank.position.x + mountOffset.x + barrelVector.x,
-    y: tank.position.y + mountOffset.y + barrelVector.y,
+    x: tankPosition.x + mountOffset.x + barrelVector.x,
+    y: tankPosition.y + mountOffset.y + barrelVector.y,
   };
   const flightTicks = Math.max(1, (2 * launch.vertical) / 48);
   return {
@@ -221,6 +227,14 @@ function predictProjectileImpact(tank: Tank, boardSize: number, power: number) {
       y: muzzle.y + velocity.y * flightTicks,
     }, boardSize),
   };
+}
+
+function observedTankPosition(tank: Tank, now: number, boardSize: number) {
+  const elapsedTicks = Math.max(0, Math.min(4, (now - tank.record.updatedAt) / GAME_TICK_MS));
+  return clampBoardPoint({
+    x: tank.position.x + tank.velocity.x * elapsedTicks,
+    y: tank.position.y + tank.velocity.y * elapsedTicks,
+  }, boardSize);
 }
 
 function launchVelocity(power: number, angle: number) {

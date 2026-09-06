@@ -87,6 +87,7 @@ export default defineSchema({
     turretDirection: v.union(v.number(), legacyDirection),
     turretLocked: v.optional(v.boolean()),
     launchAngle: v.optional(v.number()),
+    cannonPower: v.optional(v.number()),
     lastFirePower: v.optional(v.number()),
     tankSpec: v.optional(tankSpec),
     ammoType: v.union(v.literal("missile")),

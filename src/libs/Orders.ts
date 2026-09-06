@@ -1,8 +1,10 @@
 export type Command =
   | `bear ${number}`
   | `move ${number}`
-  | `aim ${number} ${number}`
-  | `fire ${number}`;
+  | `aim ${number}`
+  | `elev ${number}`
+  | `pow ${number}`
+  | "fire";
 
 export class Orders {
   constructor(readonly commands: Command[], readonly invalidCommands: string[] = []) {}
@@ -40,7 +42,8 @@ export class Orders {
 
 function normalizeCommand(command: string): Command[] | null {
   const normalized = command.trim().toLowerCase().replace(/\s+/g, " ");
-  const [action, rawAmount, rawSecondAmount, extra] = normalized.split(" ");
+  const [rawAction, rawAmount, rawSecondAmount, extra] = normalized.split(" ");
+  const action = expandCommandAction(rawAction);
   if (extra !== undefined) {
     return null;
   }
@@ -55,34 +58,72 @@ function normalizeCommand(command: string): Command[] | null {
   }
 
   if (action === "move") {
-    const squares = strictNumber(rawAmount, 0.1, 20);
-    if (squares === null || rawSecondAmount !== undefined) {
+    const units = strictNumber(rawAmount, -100, 100);
+    if (units === null || rawSecondAmount !== undefined) {
       return null;
     }
 
-    return [`move ${roundForStorage(squares)}`];
+    return [`move ${roundForStorage(units)}`];
   }
 
   if (action === "aim") {
     const bearing = strictNumber(rawAmount, 0, 360);
-    const elevation = strictNumber(rawSecondAmount, 10, 60);
-    if (bearing === null || elevation === null) {
+    if (bearing === null || rawSecondAmount !== undefined) {
       return null;
     }
 
-    return [`aim ${roundForStorage(normalizeDegrees(bearing))} ${roundForStorage(elevation)}`];
+    return [`aim ${roundForStorage(normalizeDegrees(bearing))}`];
   }
 
-  if (action === "fire") {
+  if (action === "elev") {
+    const elevation = strictNumber(rawAmount, 10, 60);
+    if (elevation === null || rawSecondAmount !== undefined) {
+      return null;
+    }
+
+    return [`elev ${roundForStorage(elevation)}`];
+  }
+
+  if (action === "pow") {
     const power = strictNumber(rawAmount, 10, 100);
     if (power === null || rawSecondAmount !== undefined) {
       return null;
     }
 
-    return [`fire ${roundForStorage(power)}`];
+    return [`pow ${roundForStorage(power)}`];
+  }
+
+  if (action === "fire") {
+    if (rawAmount !== undefined || rawSecondAmount !== undefined) {
+      return null;
+    }
+
+    return ["fire"];
   }
 
   return null;
+}
+
+function expandCommandAction(action: string | undefined) {
+  if (action === "b") {
+    return "bear";
+  }
+  if (action === "m") {
+    return "move";
+  }
+  if (action === "a") {
+    return "aim";
+  }
+  if (action === "e") {
+    return "elev";
+  }
+  if (action === "p") {
+    return "pow";
+  }
+  if (action === "f") {
+    return "fire";
+  }
+  return action;
 }
 
 function strictNumber(rawAmount: string | undefined, min: number, max: number) {
