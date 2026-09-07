@@ -12,13 +12,14 @@ const TANK_COLLISION_RADIUS_UNITS = Math.hypot(TANK_LENGTH_UNITS / 2, TANK_WIDTH
 const PROJECTILE_HIT_RADIUS_UNITS = 750;
 const PROJECTILE_GRAVITY_UNITS = 48;
 const EXPLOSION_DURATION_MS = 360;
+const WORLD_EVENT_TTL_MS = 5000;
+const WORLD_EVENT_CLEANUP_WINDOW_MS = 60_000;
 const MIN_TICK_INTERVAL_MS = 35;
 const FRAME_RATE = 25;
 const ROTATION_DEGREES_PER_TICK = 360 / (3 * FRAME_RATE);
 const MAX_SPEED_UNITS_PER_TICK = (3 * UNITS_PER_SQUARE) / FRAME_RATE;
 const ACCELERATION_UNITS_PER_TICK = MAX_SPEED_UNITS_PER_TICK / (FRAME_RATE * 0.8);
 const REBOUND_SPEED_SCALE = 0.42;
-const TANK_COLLISION_RESTITUTION = 0.38;
 const DEFAULT_FIRE_ANGLE_DEGREES = 45;
 const DEFAULT_FIRE_POWER = 100;
 const MIN_FIRE_POWER = 10;
@@ -66,8 +67,26 @@ type StoredCommand =
 
 type CollisionDetails =
   | { type: "none"; position: { x: number; y: number } }
-  | { type: "wall"; position: { x: number; y: number }; normal: { x: number; y: number }; penetration: number }
-  | { type: "tank"; position: { x: number; y: number }; normal: { x: number; y: number }; penetration: number; tank: any };
+  | { type: "wall"; position: { x: number; y: number }; normal: { x: number; y: number }; penetration: number };
+
+const observedEvent = v.object({
+  eventId: v.id("worldEvents"),
+  sourcePlayerId: v.id("players"),
+  targetTankId: v.optional(v.id("tanks")),
+  type: v.union(v.literal("explosion"), v.literal("tankCollision")),
+  position: v.object({
+    x: v.number(),
+    y: v.number(),
+  }),
+  normal: v.optional(v.object({
+    x: v.number(),
+    y: v.number(),
+  })),
+  radius: v.optional(v.number()),
+  damage: v.number(),
+  penetration: v.optional(v.number()),
+  expiresAt: v.number(),
+});
 
 export const getRoom = query({
   args: { roomCode: v.string() },
@@ -86,21 +105,34 @@ export const getRoom = query({
     const players = await ctx.db
       .query("players")
       .withIndex("by_match", (q) => q.eq("matchId", match._id))
-      .collect();
+      .take(2);
     const tanks = await ctx.db
       .query("tanks")
       .withIndex("by_match", (q) => q.eq("matchId", match._id))
-      .collect();
-    const orders = await ctx.db
-      .query("orders")
-      .withIndex("by_match", (q) => q.eq("matchId", match._id))
-      .collect();
+      .take(2);
     const projectiles = await ctx.db
       .query("projectiles")
       .withIndex("by_match", (q) => q.eq("matchId", match._id))
-      .collect();
+      .take(60);
+    const events = await ctx.db
+      .query("worldEvents")
+      .withIndex("by_match_and_expires_at", (q) => q.eq("matchId", match._id).gte("expiresAt", Date.now()))
+      .take(40);
+    const matchEnd = resolveMatchEnd(players, tanks);
+    const finishedAt = matchEnd.finished
+      ? tanks
+        .filter((tank) => tank.health <= 0)
+        .map((tank) => tank.updatedAt)
+        .sort((a, b) => a - b)[0]
+      : undefined;
+    const viewMatch = {
+      ...match,
+      status: matchEnd.finished ? "finished" : players.length >= 2 ? "active" : match.status,
+      ...(matchEnd.winnerPlayerId ? { winnerPlayerId: matchEnd.winnerPlayerId } : {}),
+      ...(finishedAt ? { finishedAt } : {}),
+    };
 
-    return { match, board, players, tanks, orders, projectiles };
+    return { match: viewMatch, board, players, tanks, orders: [], projectiles, events };
   },
 });
 
@@ -304,11 +336,6 @@ export const joinRoom = mutation({
       updatedAt: now,
     });
 
-    await ctx.db.patch(match._id, {
-      status: "active",
-      updatedAt: now,
-    });
-
     return match._id;
   },
 });
@@ -332,67 +359,72 @@ export const submitOrders = mutation({
       throw new Error("Room not found");
     }
 
-    const players = await ctx.db
-      .query("players")
-      .withIndex("by_match", (q) => q.eq("matchId", match._id))
-      .collect();
     const commander = await requireCommanderProfile(ctx, args.commanderId);
-    const player = players.find((candidate) => candidate.commanderId === commander.commanderId);
+    const player = await findCommanderPlayer(ctx, match._id, commander.commanderId);
     if (!player) {
       throw new Error("Join the room before submitting orders");
     }
 
-    const tanks = await ctx.db
-      .query("tanks")
-      .withIndex("by_match", (q) => q.eq("matchId", match._id))
-      .collect();
-    const tank = tanks.find((candidate) => candidate.playerId === player._id);
+    const tank = await findPlayerTank(ctx, match._id, player._id);
     if (!tank) {
       throw new Error("Tank not found");
     }
 
-    const commands: string[] = [];
-    for (const command of args.commands) {
-      const normalizedCommands = normalizeOrderCommand(command);
-      if (normalizedCommands.length === 0) {
-        throw new Error("Incorrect command");
-      }
-      commands.push(...normalizedCommands);
-    }
+    await queuePlayerCommands(ctx, match, player, tank, args.commands, now);
+    return null;
+  },
+});
 
-    const activeMoveRemaining = clampFinite(tank.moveRemaining, -MAX_MOVE_DISTANCE_UNITS * 4, MAX_MOVE_DISTANCE_UNITS * 4, 0);
-    if (Math.abs(activeMoveRemaining) > 0.5 && commands.every((command) => command.startsWith("move "))) {
-      const extraDistance = commands.reduce((total, command) => {
-        const parsed = parseStoredCommand(command);
-        return parsed?.action === "move" ? total + moveCommandUnitsToDistance(parsed.units) : total;
-      }, 0);
-      await ctx.db.patch(tank._id, {
-        moveRemaining: activeMoveRemaining + extraDistance,
-        updatedAt: now,
-      });
+export const runPlayerTick = mutation({
+  args: {
+    roomCode: v.string(),
+    commanderId: v.id("commanderProfiles"),
+    commands: v.array(v.string()),
+    observedEvents: v.optional(v.array(observedEvent)),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const roomCode = normalizeRoom(args.roomCode);
+    const match = await ctx.db
+      .query("matches")
+      .withIndex("by_room_code", (q) => q.eq("roomCode", roomCode))
+      .unique();
+
+    if (!match || match.status === "finished") {
       return null;
     }
 
-    await ctx.db.insert("orders", {
-      matchId: match._id,
-      playerId: player._id,
-      tankId: tank._id,
-      commands,
-      cursor: 0,
-      status: "queued",
-      createdAt: now,
-      updatedAt: now,
-    });
+    const commander = await requireCommanderProfile(ctx, args.commanderId);
+    const player = await findCommanderPlayer(ctx, match._id, commander.commanderId);
+    if (!player) {
+      throw new Error("Join the room before advancing battle");
+    }
+
+    const tank = await findPlayerTank(ctx, match._id, player._id);
+    if (!tank) {
+      throw new Error("Tank not found");
+    }
+
+    if (args.commands.length > 0) {
+      await queuePlayerCommands(ctx, match, player, tank, args.commands, now);
+    }
+
+    await advanceSinglePlayerTick(ctx, match, player, args.observedEvents ?? [], now);
     return null;
   },
 });
 
 export const runNextTick = mutation({
-  args: { roomCode: v.string() },
+  args: {
+    roomCode: v.string(),
+    agentKey: v.optional(v.string()),
+  },
   returns: v.null(),
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
-    if (!userId) {
+    const agentKeyHash = args.agentKey ? await sha256(args.agentKey) : null;
+    if (!userId && !agentKeyHash) {
       throw new Error("Sign in before advancing battle");
     }
 
@@ -407,94 +439,153 @@ export const runNextTick = mutation({
       return null;
     }
 
-    if (now - (match.lastTickAt ?? 0) < MIN_TICK_INTERVAL_MS) {
+    let player = null;
+    if (agentKeyHash) {
+      player = await ctx.db
+        .query("players")
+        .withIndex("by_match_and_agent_key", (q) => q.eq("matchId", match._id).eq("agentKeyHash", agentKeyHash))
+        .unique();
+    } else if (userId) {
+      player = await ctx.db
+        .query("players")
+        .withIndex("by_match_and_user", (q) => q.eq("matchId", match._id).eq("userId", userId))
+        .first();
+    }
+    if (!player) {
       return null;
     }
 
-    const board = await ctx.db.get(match.boardId);
-    if (!board) {
-      return null;
-    }
-
-    const players = await ctx.db
-      .query("players")
-      .withIndex("by_match", (q) => q.eq("matchId", match._id))
-      .collect();
-    if (!players.some((player) => player.userId === userId)) {
-      return null;
-    }
-
-    const tanks = await ctx.db
-      .query("tanks")
-      .withIndex("by_match", (q) => q.eq("matchId", match._id))
-      .collect();
-    const orders = await ctx.db
-      .query("orders")
-      .withIndex("by_match", (q) => q.eq("matchId", match._id))
-      .collect();
-
-    for (const tank of tanks) {
-      const order = orders.find(
-        (candidate) => candidate.tankId === tank._id && candidate.status !== "complete",
-      );
-      const command = order ? order.commands[order.cursor] : undefined;
-      const tankBeforeCommand = await ctx.db.get(tank._id);
-      if (!tankBeforeCommand) {
-        continue;
-      }
-
-      const commandComplete = await applyCommand(
-        ctx,
-        board,
-        tankBeforeCommand,
-        command,
-        order ? `${order._id}:${order.cursor}` : undefined,
-        now,
-      );
-
-      if (order && commandComplete) {
-        const cursor = order.cursor + 1;
-        await ctx.db.patch(order._id, {
-          cursor,
-          status: cursor >= order.commands.length ? "complete" : "running",
-          updatedAt: now,
-        });
-      }
-
-      const tankAfterCommand = await ctx.db.get(tank._id);
-      if (!tankAfterCommand) {
-        continue;
-      }
-
-      const latestTanks = await ctx.db
-        .query("tanks")
-        .withIndex("by_match", (q) => q.eq("matchId", match._id))
-        .collect();
-      await advanceTankMotion(ctx, board, latestTanks, tankAfterCommand, now);
-    }
-
-    await advanceProjectiles(ctx, match._id, board.size, now);
-    const freshTanks = await ctx.db
-      .query("tanks")
-      .withIndex("by_match", (q) => q.eq("matchId", match._id))
-      .collect();
-    const matchEnd = resolveMatchEnd(players, freshTanks);
-    const matchPatch: any = {
-      status: matchEnd.finished ? "finished" : match.status,
-      currentTick: match.currentTick + 1,
-      lastTickAt: now,
-      updatedAt: now,
-    };
-    if (matchEnd.finished) {
-      matchPatch.finishedAt = match.finishedAt ?? now;
-      if (matchEnd.winnerPlayerId) {
-        matchPatch.winnerPlayerId = matchEnd.winnerPlayerId;
-      }
-    }
-    await ctx.db.patch(match._id, matchPatch);
+    await advanceSinglePlayerTick(ctx, match, player, [], now);
     return null;
   },
 });
+
+async function queuePlayerCommands(ctx: any, match: any, player: any, tank: any, rawCommands: string[], now: number) {
+  const commands: string[] = [];
+  for (const command of rawCommands) {
+    const normalizedCommands = normalizeOrderCommand(command);
+    if (normalizedCommands.length === 0) {
+      throw new Error("Incorrect command");
+    }
+    commands.push(...normalizedCommands);
+  }
+
+  if (commands.length === 0) {
+    return;
+  }
+
+  const activeMoveRemaining = clampFinite(tank.moveRemaining, -MAX_MOVE_DISTANCE_UNITS * 4, MAX_MOVE_DISTANCE_UNITS * 4, 0);
+  if (Math.abs(activeMoveRemaining) > 0.5 && commands.every((command) => command.startsWith("move "))) {
+    const extraDistance = commands.reduce((total, command) => {
+      const parsed = parseStoredCommand(command);
+      return parsed?.action === "move" ? total + moveCommandUnitsToDistance(parsed.units) : total;
+    }, 0);
+    await ctx.db.patch(tank._id, {
+      moveRemaining: activeMoveRemaining + extraDistance,
+      updatedAt: now,
+    });
+    return;
+  }
+
+  await ctx.db.insert("orders", {
+    matchId: match._id,
+    playerId: player._id,
+    tankId: tank._id,
+    commands,
+    cursor: 0,
+    status: "queued",
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+async function advanceSinglePlayerTick(ctx: any, match: any, player: any, observedEvents: any[], now: number) {
+  if (now - (player.lastTickAt ?? 0) < MIN_TICK_INTERVAL_MS) {
+    return;
+  }
+
+  const board = await ctx.db.get(match.boardId);
+  if (!board) {
+    return;
+  }
+
+  const tank = await findPlayerTank(ctx, match._id, player._id);
+  if (!tank) {
+    await cleanupExpiredOwnedRows(ctx, player._id, now);
+    await ctx.db.patch(player._id, { lastTickAt: now });
+    return;
+  }
+
+  const orders = await ctx.db
+    .query("orders")
+    .withIndex("by_player", (q: any) => q.eq("playerId", player._id))
+    .take(50);
+
+  let latestTank = await ctx.db.get(tank._id);
+  if (latestTank && observedEvents.length > 0) {
+    await applyObservedEventsToTank(ctx, match, board, player, latestTank, orders, observedEvents, now);
+    latestTank = await ctx.db.get(tank._id);
+  }
+
+  if (latestTank && latestTank.health > 0) {
+    const order = orders.find(
+      (candidate: any) => candidate.tankId === latestTank._id && candidate.status !== "complete",
+    );
+    const command = order ? order.commands[order.cursor] : undefined;
+    const commandComplete = await applyCommand(
+      ctx,
+      board,
+      latestTank,
+      command,
+      order ? `${order._id}:${order.cursor}` : undefined,
+      now,
+    );
+
+    if (order && commandComplete) {
+      const cursor = order.cursor + 1;
+      await ctx.db.patch(order._id, {
+        cursor,
+        status: cursor >= order.commands.length ? "complete" : "running",
+        updatedAt: now,
+      });
+    }
+
+    const tankAfterCommand = await ctx.db.get(tank._id);
+    if (tankAfterCommand) {
+      await advanceTankMotion(ctx, board, orders, tankAfterCommand, player.lastTickAt ?? 0, now);
+      const tankAfterMotion = await ctx.db.get(tank._id);
+      latestTank = tankAfterMotion ?? tankAfterCommand;
+    }
+  }
+
+  if (latestTank) {
+    await advanceOwnedProjectiles(ctx, board.size, latestTank, now);
+  }
+
+  await cleanupExpiredOwnedRows(ctx, player._id, now);
+
+  const playerPatch: any = { lastTickAt: now };
+  const finalTank = latestTank ? await ctx.db.get(latestTank._id) : null;
+  if (finalTank && finalTank.health <= 0 && !player.finishedAt) {
+    playerPatch.finishedAt = now;
+  }
+  await ctx.db.patch(player._id, playerPatch);
+}
+
+async function findCommanderPlayer(ctx: any, matchId: any, commanderId: any) {
+  return await ctx.db
+    .query("players")
+    .withIndex("by_match_and_commander", (q: any) => q.eq("matchId", matchId).eq("commanderId", commanderId))
+    .unique();
+}
+
+async function findPlayerTank(ctx: any, matchId: any, playerId: any) {
+  const tank = await ctx.db
+    .query("tanks")
+    .withIndex("by_player", (q: any) => q.eq("playerId", playerId))
+    .unique();
+  return tank && tank.matchId === matchId ? tank : null;
+}
 
 async function ensureDefaultBoard(ctx: any, now: number) {
   const existing = await ctx.db
@@ -506,12 +597,12 @@ async function ensureDefaultBoard(ctx: any, now: number) {
     return existing._id;
   }
 
-  const walls = [];
+  const walls: { x: number; y: number }[] = [];
   for (let index = 0; index < BOARD_SIZE; index += 1) {
-    walls.push({ x: index, y: 0 });
-    walls.push({ x: index, y: BOARD_SIZE - 1 });
-    walls.push({ x: 0, y: index });
-    walls.push({ x: BOARD_SIZE - 1, y: index });
+    appendWall(walls, { x: index, y: 0 });
+    appendWall(walls, { x: index, y: BOARD_SIZE - 1 });
+    appendWall(walls, { x: 0, y: index });
+    appendWall(walls, { x: BOARD_SIZE - 1, y: index });
   }
 
   return await ctx.db.insert("boards", {
@@ -637,6 +728,7 @@ async function applyCommand(
     };
     await ctx.db.insert("projectiles", {
       matchId: tank.matchId,
+      ownerPlayerId: tank.playerId,
       ownerTankId: tank._id,
       position: clampProjectilePosition(muzzle, board.size),
       velocity,
@@ -656,18 +748,13 @@ async function applyCommand(
   return true;
 }
 
-async function advanceProjectiles(ctx: any, matchId: any, boardSize: number, now: number) {
-  let destroyedTank = false;
-  const tanks = await ctx.db
-    .query("tanks")
-    .withIndex("by_match", (q: any) => q.eq("matchId", matchId))
-    .collect();
+async function advanceOwnedProjectiles(ctx: any, boardSize: number, ownerTank: any, now: number) {
   const projectiles = await ctx.db
     .query("projectiles")
-    .withIndex("by_match", (q: any) => q.eq("matchId", matchId))
-    .collect();
+    .withIndex("by_owner_player", (q: any) => q.eq("ownerPlayerId", ownerTank.playerId))
+    .take(30);
 
-  for (const projectile of projectiles.filter((item: any) => item.status === "active" || item.status === "exploding")) {
+  for (const projectile of projectiles.filter((item: any) => item.ownerTankId === ownerTank._id && (item.status === "active" || item.status === "exploding"))) {
     if (projectile.status === "exploding") {
       if ((projectile.explosionEndsAt ?? 0) <= now) {
         await ctx.db.patch(projectile._id, { status: "spent", updatedAt: now });
@@ -695,8 +782,8 @@ async function advanceProjectiles(ctx: any, matchId: any, boardSize: number, now
       nextPosition.y >= boardSize * UNITS_PER_SQUARE - UNITS_PER_SQUARE;
     const hitsGround = nextHeight <= 0 && nextVerticalVelocity < 0;
 
-    if (hitsGround && !hitsWall) {
-      destroyedTank = (await applyBlastDamage(ctx, tanks, projectile, nextPosition, now)) || destroyedTank;
+    if (hitsWall || hitsGround) {
+      await createExplosionWorldEvent(ctx, ownerTank, projectile, clampProjectilePosition(nextPosition, boardSize), now);
     }
 
     await ctx.db.patch(projectile._id, {
@@ -708,8 +795,6 @@ async function advanceProjectiles(ctx: any, matchId: any, boardSize: number, now
       updatedAt: now,
     });
   }
-
-  return destroyedTank;
 }
 
 function resolveMatchEnd(players: any[], tanks: any[]) {
@@ -734,7 +819,7 @@ function resolveMatchEnd(players: any[], tanks: any[]) {
   };
 }
 
-async function advanceTankMotion(ctx: any, board: any, tanks: any[], tank: any, now: number) {
+async function advanceTankMotion(ctx: any, board: any, orders: any[], tank: any, tick: number, now: number) {
   if (tank.health <= 0) {
     return false;
   }
@@ -756,7 +841,7 @@ async function advanceTankMotion(ctx: any, board: any, tanks: any[], tank: any, 
     x: tank.position.x + travelVector.x * travelDistance,
     y: tank.position.y + travelVector.y * travelDistance,
   };
-  const move = resolveTankMove(desiredPosition, board, tanks, tank, velocity);
+  const move = resolveTankMove(desiredPosition, board, velocity);
 
   if (move.type === "none") {
     await ctx.db.patch(tank._id, {
@@ -787,32 +872,175 @@ async function advanceTankMotion(ctx: any, board: any, tanks: any[], tank: any, 
   const movingHealth = Math.max(0, tank.health - damage);
   await ctx.db.patch(tank._id, {
     position: reboundPosition,
-    velocity: reboundVelocity,
-    speed: vectorLength(reboundVelocity),
-    moveRemaining: Math.abs(nextMoveRemaining) <= 0.5 ? 0 : nextMoveRemaining,
+    velocity: { x: 0, y: 0 },
+    speed: 0,
+    moveRemaining: 0,
+    activeMoveCommand: "",
     health: movingHealth,
     updatedAt: now,
   });
 
-  let hitTankDestroyed = false;
-  if (move.type === "tank") {
-    const hitTankSpeed = vectorLength(move.tank.velocity ?? { x: 0, y: 0 });
-    const hitHealth = Math.max(0, move.tank.health - collisionDamageForImpact(impactSpeed + hitTankSpeed * TANK_COLLISION_RESTITUTION));
-    hitTankDestroyed = hitHealth <= 0;
-    await ctx.db.patch(move.tank._id, {
-      position: clampPosition(addVectors(move.tank.position, scaleVector(move.normal, -Math.max(move.penetration + 12, 36))), board.size),
-      velocity: scaleVector(reflectVector(move.tank.velocity ?? { x: 0, y: 0 }, scaleVector(move.normal, -1)), TANK_COLLISION_RESTITUTION),
-      speed: hitTankSpeed * TANK_COLLISION_RESTITUTION,
-      health: hitHealth,
+  await abortTankOrders(ctx, orders, [tank._id], now);
+
+  const collisionEvent: any = {
+    matchId: tank.matchId,
+    ownerPlayerId: tank.playerId,
+    tankId: tank._id,
+    type: move.type,
+    position: move.position,
+    normal: move.normal,
+    impactSpeed,
+    damageToTank: damage,
+    tick,
+    createdAt: now,
+  };
+  await ctx.db.insert("collisionEvents", collisionEvent);
+
+  return movingHealth <= 0;
+}
+
+async function createExplosionWorldEvent(ctx: any, ownerTank: any, projectile: any, position: { x: number; y: number }, now: number) {
+  const existing = await ctx.db
+    .query("worldEvents")
+    .withIndex("by_projectile", (q: any) => q.eq("projectileId", projectile._id))
+    .first();
+  if (existing) {
+    return;
+  }
+
+  await ctx.db.insert("worldEvents", {
+    matchId: ownerTank.matchId,
+    sourcePlayerId: ownerTank.playerId,
+    sourceTankId: ownerTank._id,
+    projectileId: projectile._id,
+    type: "explosion",
+    position,
+    radius: PROJECTILE_HIT_RADIUS_UNITS,
+    damage: projectile.damage,
+    createdAt: now,
+    expiresAt: now + WORLD_EVENT_TTL_MS,
+  });
+}
+
+async function applyObservedEventsToTank(ctx: any, match: any, board: any, player: any, tank: any, orders: any[], observedEvents: any[], now: number) {
+  let currentTank = tank;
+  for (const event of observedEvents.slice(0, 20)) {
+    currentTank = await ctx.db.get(currentTank._id);
+    if (!currentTank || currentTank.health <= 0) {
+      return;
+    }
+
+    if (event.sourcePlayerId === player._id || event.expiresAt <= now) {
+      continue;
+    }
+
+    const alreadyApplied = await ctx.db
+      .query("worldEventApplications")
+      .withIndex("by_player_and_event", (q: any) => q.eq("playerId", player._id).eq("eventId", event.eventId))
+      .unique();
+    if (alreadyApplied) {
+      continue;
+    }
+
+    if (event.type === "explosion") {
+      const radius = event.radius ?? PROJECTILE_HIT_RADIUS_UNITS;
+      const impactDistance = distanceBetween(currentTank.position, event.position);
+      if (impactDistance > radius) {
+        continue;
+      }
+
+      const damage = damageForImpact(impactDistance, event.damage);
+      const velocity = scaleVector(currentTank.velocity ?? { x: 0, y: 0 }, 0.5);
+      await ctx.db.patch(currentTank._id, {
+        health: Math.max(0, currentTank.health - damage),
+        velocity,
+        speed: vectorLength(velocity),
+        updatedAt: now,
+      });
+      await ctx.db.insert("worldEventApplications", {
+        matchId: match._id,
+        playerId: player._id,
+        eventId: event.eventId,
+        tankId: currentTank._id,
+        createdAt: now,
+      });
+      continue;
+    }
+
+    if (event.type === "tankCollision" && event.targetTankId === currentTank._id) {
+      const normal = event.normal ?? normalizedVector(subtractVectors(currentTank.position, event.position), { x: 1, y: 0 });
+      await ctx.db.patch(currentTank._id, {
+        position: clampPosition(addVectors(currentTank.position, scaleVector(normal, -Math.max((event.penetration ?? 0) + 12, 36))), board.size),
+        velocity: { x: 0, y: 0 },
+        speed: 0,
+        moveRemaining: 0,
+        activeMoveCommand: "",
+        health: Math.max(0, currentTank.health - event.damage),
+        updatedAt: now,
+      });
+      await abortTankOrders(ctx, orders, [currentTank._id], now);
+      await ctx.db.insert("worldEventApplications", {
+        matchId: match._id,
+        playerId: player._id,
+        eventId: event.eventId,
+        tankId: currentTank._id,
+        createdAt: now,
+      });
+    }
+  }
+}
+
+async function cleanupExpiredOwnedRows(ctx: any, playerId: any, now: number) {
+  const events = await ctx.db
+    .query("worldEvents")
+    .withIndex("by_source_player_and_expires_at", (q: any) => q.eq("sourcePlayerId", playerId).gte("expiresAt", now - WORLD_EVENT_CLEANUP_WINDOW_MS).lte("expiresAt", now))
+    .take(20);
+
+  for (const event of events) {
+    await ctx.db.delete(event._id);
+  }
+
+  const applications = await ctx.db
+    .query("worldEventApplications")
+    .withIndex("by_player_and_created_at", (q: any) => q.eq("playerId", playerId).gte("createdAt", now - WORLD_EVENT_CLEANUP_WINDOW_MS).lte("createdAt", now - WORLD_EVENT_TTL_MS))
+    .take(20);
+
+  for (const application of applications) {
+    await ctx.db.delete(application._id);
+  }
+
+  const collisions = await ctx.db
+    .query("collisionEvents")
+    .withIndex("by_owner_player_and_created_at", (q: any) => q.eq("ownerPlayerId", playerId).gte("createdAt", now - WORLD_EVENT_CLEANUP_WINDOW_MS).lte("createdAt", now - WORLD_EVENT_TTL_MS))
+    .take(20);
+
+  for (const collision of collisions) {
+    await ctx.db.delete(collision._id);
+  }
+}
+
+async function abortTankOrders(ctx: any, orders: any[], tankIds: any[], now: number) {
+  const tankIdsToAbort = new Set(tankIds);
+  for (const order of orders) {
+    if (!tankIdsToAbort.has(order.tankId) || order.status === "complete") {
+      continue;
+    }
+    await ctx.db.patch(order._id, {
+      cursor: order.commands.length,
+      status: "complete",
       updatedAt: now,
     });
   }
-
-  return movingHealth <= 0 || hitTankDestroyed;
 }
 
 function normalizeRoom(roomCode: string) {
-  return roomCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8) || "WWEFFP";
+  return roomCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8) || "Room";
+}
+
+function appendWall(walls: { x: number; y: number }[], wall: { x: number; y: number }) {
+  if (!walls.some((candidate) => candidate.x === wall.x && candidate.y === wall.y)) {
+    walls.push(wall);
+  }
 }
 
 function normalizeLobbyId(lobbyId: string | undefined) {
@@ -980,38 +1208,6 @@ async function patchHullBearing(ctx: any, tank: any, hullDirection: number, now:
   await ctx.db.patch(tank._id, patch);
 }
 
-async function applyBlastDamage(
-  ctx: any,
-  tanks: any[],
-  projectile: any,
-  impactPosition: { x: number; y: number },
-  now: number,
-) {
-  const target = tanks
-    .filter((tank: any) => tank._id !== projectile.ownerTankId && tank.health > 0)
-    .map((tank: any) => ({
-      tank,
-      impactDistance: distanceBetween(tank.position, impactPosition),
-    }))
-    .filter((candidate: any) => candidate.impactDistance <= PROJECTILE_HIT_RADIUS_UNITS)
-    .sort((a: any, b: any) => a.impactDistance - b.impactDistance)[0];
-
-  if (!target) {
-    return false;
-  }
-
-  const damage = damageForImpact(target.impactDistance, projectile.damage);
-  const health = Math.max(0, target.tank.health - damage);
-  const velocity = scaleVector(target.tank.velocity ?? { x: 0, y: 0 }, 0.5);
-  await ctx.db.patch(target.tank._id, {
-    health,
-    velocity,
-    speed: vectorLength(velocity),
-    updatedAt: now,
-  });
-  return health <= 0;
-}
-
 function normalizeDegrees(degrees: number) {
   return ((degrees % 360) + 360) % 360;
 }
@@ -1071,8 +1267,6 @@ function clampPosition(position: { x: number; y: number }, boardSize: number) {
 function resolveTankMove(
   position: { x: number; y: number },
   board: any,
-  tanks: any[],
-  movingTank: any,
   velocity: { x: number; y: number },
 ): CollisionDetails {
   const nextPosition = clampPosition(position, board.size);
@@ -1091,17 +1285,6 @@ function resolveTankMove(
       position: nextPosition,
       normal: wallCollision.normal,
       penetration: wallCollision.penetration,
-    };
-  }
-
-  const tankCollision = findTankCollision(nextPosition, tanks, movingTank, velocity);
-  if (tankCollision && dotProduct(velocity, tankCollision.normal) < -0.01) {
-    return {
-      type: "tank",
-      position: nextPosition,
-      normal: tankCollision.normal,
-      penetration: tankCollision.penetration,
-      tank: tankCollision.tank,
     };
   }
 
@@ -1135,24 +1318,6 @@ function circleCellCollision(center: { x: number; y: number }, cell: { x: number
     normal: normalizedVector(subtractVectors(center, closestPoint), wallNormalFromCell(cell)),
     penetration: TANK_COLLISION_RADIUS_UNITS - distance,
   };
-}
-
-function findTankCollision(position: { x: number; y: number }, tanks: any[], movingTank: any, velocity: { x: number; y: number }) {
-  return (
-    tanks
-      .filter((tank) => tank._id !== movingTank._id && tank.health > 0)
-      .map((tank) => {
-        const offset = subtractVectors(position, tank.position);
-        const distance = vectorLength(offset);
-        return {
-          tank,
-          normal: normalizedVector(offset, normalizedVector(scaleVector(velocity, -1), { x: 1, y: 0 })),
-          penetration: TANK_COLLISION_RADIUS_UNITS * 2 - distance,
-        };
-      })
-      .filter((collision) => collision.penetration > 0)
-      .sort((a, b) => b.penetration - a.penetration)[0] ?? null
-  );
 }
 
 function clampProjectilePosition(position: { x: number; y: number }, boardSize: number) {
@@ -1201,6 +1366,11 @@ function vectorLength(vector: { x: number; y: number }) {
   return Math.hypot(vector.x, vector.y);
 }
 
+async function sha256(value: string) {
+  const buffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function normalizedVector(vector: { x: number; y: number }, fallback: { x: number; y: number }) {
   const length = vectorLength(vector);
   if (length <= 0.0001) {
@@ -1220,9 +1390,7 @@ function collisionImpactSpeed(velocity: { x: number; y: number }, collision: Col
     return 0;
   }
 
-  const otherVelocity = collision.type === "tank" ? collision.tank.velocity ?? { x: 0, y: 0 } : { x: 0, y: 0 };
-  const relativeVelocity = subtractVectors(velocity, otherVelocity);
-  return Math.max(0, -dotProduct(relativeVelocity, collision.normal));
+  return Math.max(0, -dotProduct(velocity, collision.normal));
 }
 
 function collisionDamageForImpact(impactSpeed: number) {

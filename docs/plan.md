@@ -94,7 +94,9 @@ We should only compute target based on observed velocity of the opponent tank.
 
 It should be possible to replace human with AI.
 
-MCP should endpoint should be provided using:
+## MCP 
+
+MCP endpoint should be provided using:
 
 https://www.convex.dev/components/convex-mcp-gateway
 
@@ -102,6 +104,17 @@ https://www.convex.dev/components/convex-mcp-gateway
 - AI should be able to issue tank commands.
 - AI should be able to list games in the lobby, and join a game or create a new one
 - AI should be able to list lobbies
+
+# RAG
+
+RAG endpoint should be provided using:
+
+https://www.convex.dev/components/rag
+
+- AI should be able to search games, e.g. tell me games played by Alice
+- AI should be able to search results, e.g. tell me how many wins and loses did Alice have
+- AI should be able to seach leaderboards, e.g. tell me who was in the first top 10 over last month
+
 
 # NavBar
 

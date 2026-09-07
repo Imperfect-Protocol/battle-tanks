@@ -1,7 +1,5 @@
 # Battle Tanks Project Brief
 
-Project code: `WWEFFP`
-
 ## What We Are Building
 
 Battle Tanks is a small realtime multiplayer tactics game built with a Vite React frontend and a Convex backend.
@@ -120,7 +118,7 @@ Two friends can help test the most important part of the project: whether the ga
 Ask them to try this:
 
 1. Open the deployed app on separate devices or browser profiles.
-2. Join room `WWEFFP` with different commander names.
+2. Join room with different commander names.
 3. Submit command scripts from both sessions.
 4. Run ticks and watch whether both screens stay in sync.
 5. Say where the game felt confusing, slow, unfair, or fun.
