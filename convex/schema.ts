@@ -73,8 +73,14 @@ export default defineSchema({
     name: v.string(),
     slot: v.union(v.literal("alpha"), v.literal("bravo")),
     score: v.number(),
+    lastTickAt: v.optional(v.number()),
+    finishedAt: v.optional(v.number()),
     createdAt: v.number(),
-  }).index("by_match", ["matchId"]),
+  })
+    .index("by_match", ["matchId"])
+    .index("by_match_and_user", ["matchId", "userId"])
+    .index("by_match_and_commander", ["matchId", "commanderId"])
+    .index("by_match_and_agent_key", ["matchId", "agentKeyHash"]),
 
   tanks: defineTable({
     matchId: v.id("matches"),
@@ -94,7 +100,9 @@ export default defineSchema({
     ammoType: v.union(v.literal("missile")),
     health: v.number(),
     updatedAt: v.number(),
-  }).index("by_match", ["matchId"]),
+  })
+    .index("by_match", ["matchId"])
+    .index("by_player", ["playerId"]),
 
   orders: defineTable({
     matchId: v.id("matches"),
@@ -109,10 +117,13 @@ export default defineSchema({
     ),
     createdAt: v.number(),
     updatedAt: v.number(),
-  }).index("by_match", ["matchId"]),
+  })
+    .index("by_match", ["matchId"])
+    .index("by_player", ["playerId"]),
 
   projectiles: defineTable({
     matchId: v.id("matches"),
+    ownerPlayerId: v.optional(v.id("players")),
     ownerTankId: v.id("tanks"),
     position: vector,
     velocity: vector,
@@ -126,10 +137,14 @@ export default defineSchema({
     status: v.union(v.literal("active"), v.literal("exploding"), v.literal("spent")),
     createdAt: v.number(),
     updatedAt: v.number(),
-  }).index("by_match", ["matchId"]),
+  })
+    .index("by_match", ["matchId"])
+    .index("by_owner_tank", ["ownerTankId"])
+    .index("by_owner_player", ["ownerPlayerId"]),
 
   collisionEvents: defineTable({
     matchId: v.id("matches"),
+    ownerPlayerId: v.optional(v.id("players")),
     tankId: v.id("tanks"),
     otherTankId: v.optional(v.id("tanks")),
     type: v.union(v.literal("wall"), v.literal("tank")),
@@ -140,5 +155,39 @@ export default defineSchema({
     damageToOther: v.optional(v.number()),
     tick: v.number(),
     createdAt: v.number(),
-  }).index("by_match_and_created_at", ["matchId", "createdAt"]),
+  })
+    .index("by_match_and_created_at", ["matchId", "createdAt"])
+    .index("by_owner_player_and_created_at", ["ownerPlayerId", "createdAt"]),
+
+  worldEvents: defineTable({
+    matchId: v.id("matches"),
+    sourcePlayerId: v.id("players"),
+    sourceTankId: v.id("tanks"),
+    targetTankId: v.optional(v.id("tanks")),
+    projectileId: v.optional(v.id("projectiles")),
+    type: v.union(v.literal("explosion"), v.literal("tankCollision")),
+    position: vector,
+    normal: v.optional(vector),
+    radius: v.optional(v.number()),
+    damage: v.number(),
+    impactSpeed: v.optional(v.number()),
+    penetration: v.optional(v.number()),
+    createdAt: v.number(),
+    expiresAt: v.number(),
+  })
+    .index("by_match_and_expires_at", ["matchId", "expiresAt"])
+    .index("by_source_player_and_expires_at", ["sourcePlayerId", "expiresAt"])
+    .index("by_projectile", ["projectileId"]),
+
+  worldEventApplications: defineTable({
+    matchId: v.id("matches"),
+    playerId: v.optional(v.id("players")),
+    eventId: v.id("worldEvents"),
+    tankId: v.id("tanks"),
+    createdAt: v.number(),
+  })
+    .index("by_event", ["eventId"])
+    .index("by_event_and_tank", ["eventId", "tankId"])
+    .index("by_player_and_event", ["playerId", "eventId"])
+    .index("by_player_and_created_at", ["playerId", "createdAt"]),
 });

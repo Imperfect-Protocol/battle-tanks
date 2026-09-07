@@ -1,4 +1,5 @@
 import { httpRouter } from "convex/server";
+import { registerStaticRoutes } from "@convex-dev/static-hosting";
 import { McpGateway, type McpAuthorizerHandler } from "convex-mcp-gateway";
 import { auth } from "./auth";
 import { components } from "./_generated/api";
@@ -37,5 +38,7 @@ for (const path of ["/mcp/", "/mcp"]) {
   http.route({ path, method: "GET", handler: mcp });
   http.route({ path, method: "DELETE", handler: mcp });
 }
+
+registerStaticRoutes(http, components.staticHosting);
 
 export default http;

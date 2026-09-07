@@ -20,6 +20,7 @@ export type PlayerRecord = {
   name: string;
   score: number;
   slot: "alpha" | "bravo";
+  lastTickAt?: number;
 };
 
 export type BoardRecord = {
@@ -53,6 +54,7 @@ export type TankRecord = {
 
 export type ProjectileRecord = {
   _id: string;
+  ownerPlayerId?: string;
   ownerTankId: string;
   position: VectorRecord;
   velocity: VectorRecord;
@@ -64,6 +66,25 @@ export type ProjectileRecord = {
   launchAngle?: number;
   explosionEndsAt?: number;
   status: "active" | "exploding" | "spent";
+  updatedAt: number;
+};
+
+export type WorldEventRecord = {
+  _id: string;
+  matchId: string;
+  sourcePlayerId: string;
+  sourceTankId: string;
+  targetTankId?: string;
+  projectileId?: string;
+  type: "explosion" | "tankCollision";
+  position: VectorRecord;
+  normal?: VectorRecord;
+  radius?: number;
+  damage: number;
+  impactSpeed?: number;
+  penetration?: number;
+  createdAt: number;
+  expiresAt: number;
 };
 
 export type OrderRecord = {

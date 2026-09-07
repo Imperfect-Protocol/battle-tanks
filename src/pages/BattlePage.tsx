@@ -17,10 +17,30 @@ export function BattlePage() {
   const [battleName, setBattleName] = useState("Battle");
   const [battleNameError, setBattleNameError] = useState("");
   const joinAttemptedRef = useRef(false);
+  const tickInFlightRef = useRef<Promise<unknown> | null>(null);
   const cleanRoomCode = roomCode.toUpperCase();
-  const { gameRoom, createRoom, joinRoom, submitScript, runNextTick } = useGameRoom(cleanRoomCode);
+  const { gameRoom, createRoom, joinRoom, submitScript, tickPlayer } = useGameRoom(cleanRoomCode);
   const tankByPlayer = useMemo(() => new Map(gameRoom?.tanks.map((tank) => [tank.playerId, tank]) ?? []), [gameRoom]);
   const localPlayer = gameRoom?.players.find((player) => player.commanderId === commanderId);
+  const observedEvents = useMemo(
+    () =>
+      gameRoom?.events
+        .filter((event) => event.sourcePlayerId !== localPlayer?.id && event.expiresAt > Date.now())
+        .map((event) => ({
+          eventId: event._id,
+          sourcePlayerId: event.sourcePlayerId,
+          targetTankId: event.targetTankId,
+          type: event.type,
+          position: event.position,
+          normal: event.normal,
+          radius: event.radius,
+          damage: event.damage,
+          penetration: event.penetration,
+          expiresAt: event.expiresAt,
+        }))
+        .slice(0, 20) ?? [],
+    [gameRoom?.events, localPlayer?.id],
+  );
   const ownsClock = Boolean(localPlayer);
   const roomExists = Boolean(gameRoom?.match);
   const hasJoinedRoom = Boolean(localPlayer);
@@ -37,16 +57,25 @@ export function BattlePage() {
   );
 
   useEffect(() => {
-    if (!gameRoom?.match || !ownsClock) {
+    if (!gameRoom?.match || !ownsClock || !commanderId) {
       return;
     }
 
     const timer = window.setInterval(() => {
-      void runNextTick({ roomCode: cleanRoomCode });
+      if (tickInFlightRef.current) {
+        return;
+      }
+      const tick = tickPlayer(commanderId, observedEvents);
+      tickInFlightRef.current = tick;
+      void tick.finally(() => {
+        if (tickInFlightRef.current === tick) {
+          tickInFlightRef.current = null;
+        }
+      });
     }, GAME_TICK_MS);
 
     return () => window.clearInterval(timer);
-  }, [cleanRoomCode, gameRoom?.match, ownsClock, runNextTick]);
+  }, [commanderId, gameRoom?.match, observedEvents, ownsClock, tickPlayer]);
 
   useEffect(() => {
     if (!isJoinRoute || !roomExists || hasJoinedRoom || joinAttemptedRef.current) {
@@ -97,10 +126,8 @@ export function BattlePage() {
       throw new Error("Choose a commander before submitting orders");
     }
 
-    await submitScript(commanderId, command);
-    if (ownsClock) {
-      void runNextTick({ roomCode: cleanRoomCode });
-    }
+    await tickInFlightRef.current;
+    await submitScript(commanderId, command, observedEvents);
     return describeCommand(command);
   };
 
