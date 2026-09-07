@@ -8,9 +8,10 @@ const CANNON_WIDTH_PX = 4;
 const PROJECTILE_CAMERA_HEIGHT_UNITS = 16000;
 const MAX_PROJECTILE_SIZE_PX = 18;
 const DEFAULT_BOARD_SIZE = 12;
-const DEFAULT_ANIMATION_MS = 100;
-const MIN_ANIMATION_MS = 40;
-const MAX_ANIMATION_MS = 180;
+const SERVER_TICK_MS = 40;
+const PROJECTILE_GRAVITY_UNITS = 48;
+const RENDER_EMA_WEIGHT = 0.1;
+const DEFAULT_SEGMENT_MS = 40;
 
 type BattleBoardProps = {
   gameRoom: GameRoom | null;
@@ -23,19 +24,33 @@ export function BattleBoard({ gameRoom, localPlayerId = null }: BattleBoardProps
   const [frameNow, setFrameNow] = useState(Date.now());
   const visualState = useInterpolatedWorld(gameRoom);
   const localTank = gameRoom?.tanks.find((tank) => tank.playerId === localPlayerId && tank.alive);
-  const aimImpact = localTank ? predictProjectileImpact(localTank, boardSize, visualState, frameNow, localTank.record.cannonPower ?? localTank.record.lastFirePower ?? 50) : null;
-  const targetMarkers = localTank && aimImpact
+  const rawAimImpact = localTank ? predictProjectileImpact(localTank, boardSize, visualState, frameNow, localTank.record.cannonPower ?? localTank.record.lastFirePower ?? 50) : null;
+  const rawTargetMarkers = localTank && rawAimImpact
     ? gameRoom?.tanks
       .filter((tank) => tank.playerId !== localPlayerId && tank.alive)
       .map((tank) => ({
         id: tank.id,
         color: normalizeTankSpec(localTank.record.tankSpec).hullColor,
         position: clampBoardPoint({
-          x: observedTankPosition(tank, visualState, frameNow, boardSize).x + tank.velocity.x * aimImpact.flightTicks,
-          y: observedTankPosition(tank, visualState, frameNow, boardSize).y + tank.velocity.y * aimImpact.flightTicks,
+          x: observedTankPosition(tank, visualState, frameNow, boardSize).x + tank.velocity.x * rawAimImpact.flightTicks,
+          y: observedTankPosition(tank, visualState, frameNow, boardSize).y + tank.velocity.y * rawAimImpact.flightTicks,
         }, boardSize),
       })) ?? []
     : [];
+  const smoothedMarkerPositions = useInterpolatedGroundPoints([
+    ...(localTank && rawAimImpact ? [{ key: `aim:${localTank.id}`, position: rawAimImpact.position }] : []),
+    ...rawTargetMarkers.map((target) => ({ key: `target:${target.id}`, position: target.position })),
+  ], frameNow);
+  const aimImpact = rawAimImpact && localTank
+    ? {
+      ...rawAimImpact,
+      position: smoothedMarkerPositions.get(`aim:${localTank.id}`) ?? rawAimImpact.position,
+    }
+    : null;
+  const targetMarkers = rawTargetMarkers.map((target) => ({
+    ...target,
+    position: smoothedMarkerPositions.get(`target:${target.id}`) ?? target.position,
+  }));
   const projectiles = useMemo(
     () =>
       gameRoom?.projectiles.filter(
@@ -162,12 +177,13 @@ function TankPiece({
   now: number;
   name: string;
 }) {
-  const hullRotation = normalizeDegrees(angleFromDirection(tank.record.hullDirection));
-  const turretHeading = normalizeDegrees(angleFromDirection(tank.record.turretDirection));
+  const pose = visualState.tankPose(tank, now);
+  const hullRotation = normalizeDegrees(pose.bearing);
+  const turretHeading = normalizeDegrees(pose.aim);
   const turretRotation = normalizeDegrees(turretHeading - hullRotation);
   const tankSpec = normalizeTankSpec(tank.record.tankSpec);
   const isDestroyed = tank.health <= 0;
-  const position = observedTankPosition(tank, visualState, now, boardSize);
+  const position = clampBoardPoint(pose, boardSize);
 
   return (
     <div
@@ -247,32 +263,68 @@ function projectileStyle(x: number, y: number, height: number, boardSize: number
 
 function predictProjectileImpact(tank: Tank, boardSize: number, visualState: InterpolatedWorld, now: number, power: number) {
   const tankSpec = normalizeTankSpec(tank.record.tankSpec);
+  const pose = visualState.tankPose(tank, now);
   const launch = launchVelocity(power, tank.record.launchAngle ?? 45);
-  const muzzleVelocity = vectorFromBearing(angleFromDirection(tank.record.turretDirection), launch.horizontal);
+  const muzzleVelocity = vectorFromBearing(pose.aim, launch.horizontal);
   const velocity = {
     x: muzzleVelocity.x + tank.velocity.x,
     y: muzzleVelocity.y + tank.velocity.y,
   };
   const mountOffset = vectorFromBearing(
-    angleFromDirection(tank.record.hullDirection),
+    pose.bearing,
     (tankSpec.turretOffset - 0.5) * 1180,
   );
   const barrelVector = vectorFromBearing(
-    angleFromDirection(tank.record.turretDirection),
+    pose.aim,
     (tankSpec.turretSize * 620) / 2 + tankSpec.cannonLength * 1180,
   );
-  const tankPosition = observedTankPosition(tank, visualState, now, boardSize);
+  const tankPosition = clampBoardPoint(pose, boardSize);
   const muzzle = {
     x: tankPosition.x + mountOffset.x + barrelVector.x,
     y: tankPosition.y + mountOffset.y + barrelVector.y,
   };
-  const flightTicks = Math.max(1, (2 * launch.vertical) / 48);
+  return simulateProjectileImpact(muzzle, velocity, launch.vertical, boardSize);
+}
+
+function simulateProjectileImpact(
+  muzzle: { x: number; y: number },
+  velocity: { x: number; y: number },
+  verticalVelocity: number,
+  boardSize: number,
+) {
+  let position = clampBoardPoint(muzzle, boardSize);
+  let height = 0;
+  let currentVerticalVelocity = verticalVelocity;
+
+  for (let flightTicks = 1; flightTicks <= 240; flightTicks += 1) {
+    const nextPosition = {
+      x: position.x + velocity.x,
+      y: position.y + velocity.y,
+    };
+    const nextHeight = height + currentVerticalVelocity;
+    const nextVerticalVelocity = currentVerticalVelocity - PROJECTILE_GRAVITY_UNITS;
+    const hitsWall =
+      nextPosition.x <= 1000 ||
+      nextPosition.y <= 1000 ||
+      nextPosition.x >= boardSize * 1000 - 1000 ||
+      nextPosition.y >= boardSize * 1000 - 1000;
+    const hitsGround = nextHeight <= 0 && nextVerticalVelocity < 0;
+
+    position = clampBoardPoint(nextPosition, boardSize);
+    height = Math.max(0, nextHeight);
+    currentVerticalVelocity = nextVerticalVelocity;
+
+    if (hitsWall || hitsGround) {
+      return {
+        flightTicks,
+        position,
+      };
+    }
+  }
+
   return {
-    flightTicks,
-    position: clampBoardPoint({
-      x: muzzle.x + velocity.x * flightTicks,
-      y: muzzle.y + velocity.y * flightTicks,
-    }, boardSize),
+    flightTicks: 240,
+    position,
   };
 }
 
@@ -298,7 +350,105 @@ function observedProjectilePosition(projectile: Missile, visualState: Interpolat
   };
 }
 
+type GroundPoint = {
+  key: string;
+  position: { x: number; y: number };
+};
+
+type GroundPointState = {
+  targetPosition: { x: number; y: number };
+  targetVelocity: { x: number; y: number };
+  targetUpdatedAt: number;
+  renderedPosition: { x: number; y: number };
+  renderedVelocity: { x: number; y: number };
+  lastRenderedAt: number;
+};
+
+function useInterpolatedGroundPoints(points: GroundPoint[], now: number) {
+  const statesRef = useRef(new Map<string, GroundPointState>());
+  const activeKeys = new Set<string>();
+  const rendered = new Map<string, { x: number; y: number }>();
+
+  for (const point of points) {
+    activeKeys.add(point.key);
+    const state = rememberGroundPoint(statesRef.current, point, now);
+    rendered.set(point.key, renderGroundPoint(state, now));
+  }
+
+  for (const key of statesRef.current.keys()) {
+    if (!activeKeys.has(key)) {
+      statesRef.current.delete(key);
+    }
+  }
+
+  return rendered;
+}
+
+function rememberGroundPoint(states: Map<string, GroundPointState>, point: GroundPoint, now: number) {
+  const previous = states.get(point.key);
+  if (!previous) {
+    const state = {
+      targetPosition: point.position,
+      targetVelocity: { x: 0, y: 0 },
+      targetUpdatedAt: now,
+      renderedPosition: point.position,
+      renderedVelocity: { x: 0, y: 0 },
+      lastRenderedAt: now,
+    };
+    states.set(point.key, state);
+    return state;
+  }
+
+  const targetDt = Math.max(1, now - previous.targetUpdatedAt);
+  previous.targetVelocity = dividePoint(subtractPoint(point.position, previous.targetPosition), targetDt);
+  previous.targetPosition = point.position;
+  previous.targetUpdatedAt = now;
+  return previous;
+}
+
+function renderGroundPoint(state: GroundPointState, now: number) {
+  const frameDt = Math.max(0, now - state.lastRenderedAt);
+  if (frameDt <= 0) {
+    return state.renderedPosition;
+  }
+
+  const physicsPosition = advancePoint(state.renderedPosition, state.renderedVelocity, frameDt);
+  state.renderedPosition = emaPoint(physicsPosition, state.targetPosition, RENDER_EMA_WEIGHT);
+  state.renderedVelocity = emaPoint(state.renderedVelocity, state.targetVelocity, RENDER_EMA_WEIGHT);
+  state.lastRenderedAt = now;
+  return state.renderedPosition;
+}
+
+function advancePoint(point: { x: number; y: number }, velocity: { x: number; y: number }, elapsedMs: number) {
+  return {
+    x: point.x + velocity.x * elapsedMs,
+    y: point.y + velocity.y * elapsedMs,
+  };
+}
+
+function subtractPoint(a: { x: number; y: number }, b: { x: number; y: number }) {
+  return {
+    x: a.x - b.x,
+    y: a.y - b.y,
+  };
+}
+
+function dividePoint(point: { x: number; y: number }, scalar: number) {
+  return {
+    x: point.x / scalar,
+    y: point.y / scalar,
+  };
+}
+
+function emaPoint(current: { x: number; y: number }, target: { x: number; y: number }, weight: number) {
+  return {
+    x: current.x + (target.x - current.x) * weight,
+    y: current.y + (target.y - current.y) * weight,
+  };
+}
+
 type InterpolatedWorld = {
+  tankPose: (tank: Tank, now: number) => { x: number; y: number; bearing: number; aim: number };
   tankPosition: (tank: Tank, now: number) => { x: number; y: number };
   projectilePosition: (projectile: Missile, now: number) => { x: number; y: number; height: number };
 };
@@ -307,20 +457,31 @@ type InterpolatedParams = {
   x: number;
   y: number;
   height: number;
+  bearing: number;
+  aim: number;
 };
 
 type InterpolationSnapshot = {
   key: string;
   serverUpdatedAt: number;
   params: InterpolatedParams;
+  velocity: InterpolatedParams;
+};
+
+type ServerSnapshot = {
+  serverUpdatedAt: number;
+  params: InterpolatedParams;
+  velocity: InterpolatedParams;
 };
 
 type InterpolationState = {
-  serverUpdatedAt: number;
-  localReceivedAt: number;
-  durationMs: number;
-  from: InterpolatedParams;
-  to: InterpolatedParams;
+  previousServer: ServerSnapshot;
+  latestServer: ServerSnapshot;
+  segmentStartedAt: number;
+  segmentDurationMs: number;
+  renderedParams: InterpolatedParams;
+  renderedVelocity: InterpolatedParams;
+  lastRenderedAt: number;
 };
 
 function useInterpolatedWorld(gameRoom: GameRoom | null): InterpolatedWorld {
@@ -333,6 +494,15 @@ function useInterpolatedWorld(gameRoom: GameRoom | null): InterpolatedWorld {
         x: tank.position.x,
         y: tank.position.y,
         height: 0,
+        bearing: angleFromDirection(tank.record.hullDirection),
+        aim: angleFromDirection(tank.record.turretDirection),
+      },
+      velocity: {
+        x: tank.velocity.x,
+        y: tank.velocity.y,
+        height: 0,
+        bearing: 0,
+        aim: 0,
       },
     })) ?? [];
     const projectileSnapshots = gameRoom?.projectiles.map((projectile) => ({
@@ -342,12 +512,26 @@ function useInterpolatedWorld(gameRoom: GameRoom | null): InterpolatedWorld {
         x: projectile.position.x,
         y: projectile.position.y,
         height: projectile.record.height ?? 0,
+        bearing: 0,
+        aim: 0,
+      },
+      velocity: {
+        x: projectile.velocity.x,
+        y: projectile.velocity.y,
+        height: projectile.record.verticalVelocity ?? 0,
+        bearing: 0,
+        aim: 0,
       },
     })) ?? [];
     return [...tankSnapshots, ...projectileSnapshots];
   }, [gameRoom?.tanks, gameRoom?.projectiles]);
   const snapshotSignature = useMemo(
-    () => snapshots.map((snapshot) => `${snapshot.key}:${snapshot.serverUpdatedAt}:${snapshot.params.x}:${snapshot.params.y}:${snapshot.params.height}`).join("|"),
+    () =>
+      snapshots
+        .map((snapshot) =>
+          `${snapshot.key}:${snapshot.serverUpdatedAt}:${snapshot.params.x}:${snapshot.params.y}:${snapshot.params.height}:${snapshot.params.bearing}:${snapshot.params.aim}:${snapshot.velocity.x}:${snapshot.velocity.y}:${snapshot.velocity.height}`,
+        )
+        .join("|"),
     [snapshots],
   );
 
@@ -368,12 +552,17 @@ function useInterpolatedWorld(gameRoom: GameRoom | null): InterpolatedWorld {
   }, [snapshotSignature, snapshots]);
 
   return useMemo(() => ({
+    tankPose: (tank: Tank, now: number) => {
+      const params = readInterpolatedParams(statesRef.current, `tank:${tank.id}`, now, tankFallbackParams(tank));
+      return {
+        x: params.x,
+        y: params.y,
+        bearing: normalizeDegrees(params.bearing),
+        aim: normalizeDegrees(params.aim),
+      };
+    },
     tankPosition: (tank: Tank, now: number) => {
-      const params = readInterpolatedParams(statesRef.current, `tank:${tank.id}`, now, {
-        x: tank.position.x,
-        y: tank.position.y,
-        height: 0,
-      });
+      const params = readInterpolatedParams(statesRef.current, `tank:${tank.id}`, now, tankFallbackParams(tank));
       return { x: params.x, y: params.y };
     },
     projectilePosition: (projectile: Missile, now: number) => {
@@ -381,37 +570,67 @@ function useInterpolatedWorld(gameRoom: GameRoom | null): InterpolatedWorld {
         x: projectile.position.x,
         y: projectile.position.y,
         height: projectile.record.height ?? 0,
+        bearing: 0,
+        aim: 0,
       });
     },
   }), []);
 }
 
+function tankFallbackParams(tank: Tank): InterpolatedParams {
+  return {
+    x: tank.position.x,
+    y: tank.position.y,
+    height: 0,
+    bearing: angleFromDirection(tank.record.hullDirection),
+    aim: angleFromDirection(tank.record.turretDirection),
+  };
+}
+
 function rememberInterpolationSnapshot(states: Map<string, InterpolationState>, snapshot: InterpolationSnapshot, localReceivedAt: number) {
   const previous = states.get(snapshot.key);
   if (!previous) {
+    const velocity = serverVelocityPerMs(snapshot.velocity);
     states.set(snapshot.key, {
-      serverUpdatedAt: snapshot.serverUpdatedAt,
-      localReceivedAt,
-      durationMs: DEFAULT_ANIMATION_MS,
-      from: snapshot.params,
-      to: snapshot.params,
+      previousServer: snapshot,
+      latestServer: snapshot,
+      segmentStartedAt: localReceivedAt,
+      segmentDurationMs: DEFAULT_SEGMENT_MS,
+      renderedParams: snapshot.params,
+      renderedVelocity: velocity,
+      lastRenderedAt: localReceivedAt,
     });
     return;
   }
 
-  if (snapshot.serverUpdatedAt <= previous.serverUpdatedAt) {
+  if (snapshot.serverUpdatedAt <= previous.latestServer.serverUpdatedAt) {
     return;
   }
 
-  const serverDelta = snapshot.serverUpdatedAt - previous.serverUpdatedAt;
+  const nextSnapshot = alignSnapshotAngles(snapshot, previous.latestServer.params);
+  const current = renderedStateAt(previous, localReceivedAt);
+  const segmentDurationMs = serverIntervalDuration(nextSnapshot.serverUpdatedAt - previous.latestServer.serverUpdatedAt);
 
   states.set(snapshot.key, {
-    serverUpdatedAt: snapshot.serverUpdatedAt,
-    localReceivedAt,
-    durationMs: clamp(serverDelta, MIN_ANIMATION_MS, MAX_ANIMATION_MS),
-    from: paramsAt(previous, localReceivedAt),
-    to: snapshot.params,
+    previousServer: previous.latestServer,
+    latestServer: nextSnapshot,
+    segmentStartedAt: localReceivedAt,
+    segmentDurationMs,
+    renderedParams: current.params,
+    renderedVelocity: current.velocity,
+    lastRenderedAt: localReceivedAt,
   });
+}
+
+function alignSnapshotAngles(snapshot: InterpolationSnapshot, previousParams: InterpolatedParams): InterpolationSnapshot {
+  return {
+    ...snapshot,
+    params: {
+      ...snapshot.params,
+      bearing: unwrapAngle(previousParams.bearing, snapshot.params.bearing),
+      aim: unwrapAngle(previousParams.aim, snapshot.params.aim),
+    },
+  };
 }
 
 function readInterpolatedParams(states: Map<string, InterpolationState>, key: string, now: number, fallback: InterpolatedParams) {
@@ -420,9 +639,89 @@ function readInterpolatedParams(states: Map<string, InterpolationState>, key: st
 }
 
 function paramsAt(state: InterpolationState, now: number) {
-  const elapsed = Math.max(0, now - state.localReceivedAt);
-  const progress = state.durationMs <= 0 ? 1 : clamp(elapsed / state.durationMs, 0, 1);
-  return interpolateParams(state.from, state.to, progress);
+  return renderedStateAt(state, now).params;
+}
+
+function renderedStateAt(state: InterpolationState, now: number) {
+  const frameDt = Math.max(0, now - state.lastRenderedAt);
+  if (frameDt <= 0) {
+    return {
+      params: state.renderedParams,
+      velocity: state.renderedVelocity,
+    };
+  }
+
+  const raw = rawSegmentStateAt(state, now);
+  const physicsParams = advanceParams(state.renderedParams, state.renderedVelocity, frameDt);
+  state.renderedParams = emaParams(physicsParams, raw.params, RENDER_EMA_WEIGHT);
+  state.renderedVelocity = emaParams(state.renderedVelocity, raw.velocity, RENDER_EMA_WEIGHT);
+  state.lastRenderedAt = now;
+
+  return {
+    params: state.renderedParams,
+    velocity: state.renderedVelocity,
+  };
+}
+
+function rawSegmentStateAt(state: InterpolationState, now: number) {
+  const elapsed = Math.max(0, now - state.segmentStartedAt);
+  const durationMs = Math.max(1, state.segmentDurationMs);
+  const startVelocity = withAngularSegmentVelocity(
+    serverVelocityPerMs(state.previousServer.velocity),
+    state.previousServer.params,
+    state.latestServer.params,
+    durationMs,
+  );
+  const endVelocity = withAngularSegmentVelocity(
+    serverVelocityPerMs(state.latestServer.velocity),
+    state.previousServer.params,
+    state.latestServer.params,
+    durationMs,
+  );
+
+  if (elapsed >= durationMs) {
+    return {
+      params: state.latestServer.params,
+      velocity: endVelocity,
+    };
+  }
+
+  const progress = elapsed / durationMs;
+
+  return {
+    params: interpolateParams(state.previousServer.params, state.latestServer.params, progress),
+    velocity: interpolateParams(startVelocity, endVelocity, progress),
+  };
+}
+
+function advanceParams(params: InterpolatedParams, velocity: InterpolatedParams, elapsedMs: number) {
+  return {
+    x: params.x + velocity.x * elapsedMs,
+    y: params.y + velocity.y * elapsedMs,
+    height: params.height + velocity.height * elapsedMs,
+    bearing: params.bearing + velocity.bearing * elapsedMs,
+    aim: params.aim + velocity.aim * elapsedMs,
+  };
+}
+
+function divideParams(params: InterpolatedParams, scalar: number) {
+  return {
+    x: params.x / scalar,
+    y: params.y / scalar,
+    height: params.height / scalar,
+    bearing: params.bearing / scalar,
+    aim: params.aim / scalar,
+  };
+}
+
+function subtractParams(a: InterpolatedParams, b: InterpolatedParams) {
+  return {
+    x: a.x - b.x,
+    y: a.y - b.y,
+    height: a.height - b.height,
+    bearing: a.bearing - b.bearing,
+    aim: a.aim - b.aim,
+  };
 }
 
 function interpolateParams(a: InterpolatedParams, b: InterpolatedParams, progress: number) {
@@ -430,7 +729,38 @@ function interpolateParams(a: InterpolatedParams, b: InterpolatedParams, progres
     x: a.x + (b.x - a.x) * progress,
     y: a.y + (b.y - a.y) * progress,
     height: a.height + (b.height - a.height) * progress,
+    bearing: a.bearing + (b.bearing - a.bearing) * progress,
+    aim: a.aim + (b.aim - a.aim) * progress,
   };
+}
+
+function emaParams(current: InterpolatedParams, target: InterpolatedParams, weight: number) {
+  return interpolateParams(current, target, weight);
+}
+
+function serverVelocityPerMs(velocity: InterpolatedParams) {
+  return divideParams(velocity, SERVER_TICK_MS);
+}
+
+function withAngularSegmentVelocity(
+  velocity: InterpolatedParams,
+  from: InterpolatedParams,
+  to: InterpolatedParams,
+  durationMs: number,
+) {
+  const segmentVelocity = divideParams(subtractParams(to, from), durationMs);
+  return {
+    ...velocity,
+    bearing: segmentVelocity.bearing,
+    aim: segmentVelocity.aim,
+  };
+}
+
+function serverIntervalDuration(serverIntervalMs: number) {
+  if (serverIntervalMs <= 0) {
+    return DEFAULT_SEGMENT_MS;
+  }
+  return serverIntervalMs;
 }
 
 function launchVelocity(power: number, angle: number) {
@@ -488,6 +818,14 @@ function perspectiveSizeForHeight(height: number) {
 
 function normalizeDegrees(degrees: number) {
   return ((degrees % 360) + 360) % 360;
+}
+
+function unwrapAngle(from: number, to: number) {
+  return from + shortestAngleDelta(from, to);
+}
+
+function shortestAngleDelta(from: number, to: number) {
+  return ((to - from + 540) % 360) - 180;
 }
 
 function angleFromDirection(direction: Tank["record"]["hullDirection"]) {
