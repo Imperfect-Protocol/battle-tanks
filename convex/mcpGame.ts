@@ -106,7 +106,7 @@ export const listGames = query({
         .withIndex("by_match", (q) => q.eq("matchId", match._id))
         .take(2);
 
-      const status = match.status === "active" ? "active" as const : "lobby" as const;
+      const status = players.length >= 2 ? "active" as const : "lobby" as const;
       games.push({
         roomCode: match.roomCode,
         ...(match.battleName ? { battleName: match.battleName } : {}),
@@ -239,11 +239,6 @@ export const joinGame = mutation({
       createdAt: now,
     });
     await insertTank(ctx, match._id, playerId, slot, playerName, now);
-    await ctx.db.patch(match._id, {
-      status: "active",
-      updatedAt: now,
-    });
-
     return { roomCode, battleName: match.battleName ?? "Battle", agentKey, playerName, slot, commandHelp };
   },
 });
@@ -591,12 +586,11 @@ async function requireAgentTank(ctx: any, roomCode: string, agentKey: string) {
     throw new Error("Invalid agent key");
   }
 
-  const tanks = await ctx.db
+  const tank = await ctx.db
     .query("tanks")
-    .withIndex("by_match", (q: any) => q.eq("matchId", match._id))
-    .take(2);
-  const tank = tanks.find((candidate: any) => candidate.playerId === player._id);
-  if (!tank) {
+    .withIndex("by_player", (q: any) => q.eq("playerId", player._id))
+    .unique();
+  if (!tank || tank.matchId !== match._id) {
     throw new Error("Tank not found");
   }
 
@@ -605,11 +599,10 @@ async function requireAgentTank(ctx: any, roomCode: string, agentKey: string) {
 
 async function findAgentPlayer(ctx: any, matchId: any, agentKey: string) {
   const agentKeyHash = await sha256(agentKey);
-  const players = await ctx.db
+  return await ctx.db
     .query("players")
-    .withIndex("by_match", (q: any) => q.eq("matchId", matchId))
-    .take(2);
-  return players.find((player: any) => player.agentKeyHash === agentKeyHash) ?? null;
+    .withIndex("by_match_and_agent_key", (q: any) => q.eq("matchId", matchId).eq("agentKeyHash", agentKeyHash))
+    .unique();
 }
 
 function normalizeOrderCommand(command: string): string[] {
