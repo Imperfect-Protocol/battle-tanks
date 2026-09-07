@@ -2,13 +2,14 @@ import { Board } from "./Board";
 import { Missile } from "./Missile";
 import { Player } from "./Player";
 import { Tank } from "./Tank";
-import type { BoardRecord, OrderRecord, PlayerRecord, ProjectileRecord, TankRecord } from "./types";
+import type { BoardRecord, OrderRecord, PlayerRecord, ProjectileRecord, TankRecord, WorldEventRecord } from "./types";
 
 export class GameRoom {
   readonly board: Board | null;
   readonly players: Player[];
   readonly tanks: Tank[];
   readonly projectiles: Missile[];
+  readonly events: WorldEventRecord[];
 
   constructor(
     readonly match: {
@@ -24,6 +25,7 @@ export class GameRoom {
     tanks: TankRecord[],
     projectiles: ProjectileRecord[],
     readonly orders: OrderRecord[],
+    events: WorldEventRecord[] = [],
   ) {
     this.board = board ? new Board(board) : null;
     this.players = players.map((player) => new Player(player));
@@ -31,6 +33,7 @@ export class GameRoom {
     this.projectiles = projectiles
       .filter((projectile) => projectile.status === "active" || projectile.status === "exploding")
       .map((projectile) => new Missile(projectile));
+    this.events = events;
   }
 
   get ready() {
