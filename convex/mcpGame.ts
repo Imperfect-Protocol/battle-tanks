@@ -10,8 +10,8 @@ const TANK_WIDTH_UNITS = UNITS_PER_SQUARE * 0.62;
 const TANK_COLLISION_RADIUS_UNITS = Math.hypot(TANK_LENGTH_UNITS / 2, TANK_WIDTH_UNITS / 2);
 const DEFAULT_FIRE_ANGLE_DEGREES = 45;
 const DEFAULT_FIRE_POWER = 100;
-const MOVE_COMMAND_UNITS_PER_SQUARE = 10;
-const MAX_MOVE_COMMAND_UNITS = 100;
+const MOVE_COMMAND_UNITS_PER_SQUARE = 1;
+const MAX_MOVE_COMMAND_UNITS = 10;
 const MAX_MOVE_DISTANCE_UNITS = (MAX_MOVE_COMMAND_UNITS / MOVE_COMMAND_UNITS_PER_SQUARE) * UNITS_PER_SQUARE;
 const MIN_AIM_ELEVATION_DEGREES = 10;
 const MAX_AIM_ELEVATION_DEGREES = 60;
@@ -55,7 +55,7 @@ const gameSummaryValidator = v.object({
 });
 
 const commandHelp =
-  "Commands: bear/b <0-360>, move/m <-100..100> where 10 units is one square, aim/a <0-360>, elev/e <10-60>, pow/p <10-100>, fire/f.";
+  "Commands: bear/b <00-36>, move/m <-10..10> in squares, aim/a <00-36> to hold absolute turret aim, elev/e <10-60>, pow/p <10-100>, fire/f, ret/r to return turret to hull bearing.";
 
 type StoredCommand =
   | { action: "bear"; bearing: number }
@@ -63,7 +63,8 @@ type StoredCommand =
   | { action: "aim"; bearing: number }
   | { action: "elev"; elevation: number }
   | { action: "pow"; power: number }
-  | { action: "fire" };
+  | { action: "fire" }
+  | { action: "ret" };
 
 export const listLobbies = query({
   args: {},
@@ -611,8 +612,23 @@ function normalizeOrderCommand(command: string): string[] {
   }
 
   const normalized = command.trim().toLowerCase().replace(/\s+/g, " ");
-  const parsed = parseStoredCommand(normalized);
+  const parsed = parseInputCommand(normalized);
   return parsed ? [serializeCommand(parsed)] : [];
+}
+
+function parseInputCommand(command: string): StoredCommand | null {
+  const parsed = parseStoredCommand(command);
+  if (!parsed) {
+    return null;
+  }
+
+  if (parsed.action === "bear" || parsed.action === "aim") {
+    const [, rawAmount] = command.trim().toLowerCase().replace(/\s+/g, " ").split(" ");
+    const bearing = strictHeading(rawAmount);
+    return bearing === null ? null : { action: parsed.action, bearing: roundForStorage(bearing) };
+  }
+
+  return parsed;
 }
 
 function parseStoredCommand(command: string): StoredCommand | null {
@@ -651,6 +667,10 @@ function parseStoredCommand(command: string): StoredCommand | null {
     return rawAmount === undefined && rawSecondAmount === undefined ? { action } : null;
   }
 
+  if (action === "ret") {
+    return rawAmount === undefined && rawSecondAmount === undefined ? { action } : null;
+  }
+
   return null;
 }
 
@@ -669,6 +689,9 @@ function serializeCommand(command: StoredCommand) {
   }
   if (command.action === "pow") {
     return `pow ${roundForStorage(command.power)}`;
+  }
+  if (command.action === "ret") {
+    return command.action;
   }
   return "fire";
 }
@@ -691,6 +714,9 @@ function expandCommandAction(action: string | undefined) {
   }
   if (action === "f") {
     return "fire";
+  }
+  if (action === "r") {
+    return "ret";
   }
   return action;
 }
@@ -790,6 +816,11 @@ function strictNumber(rawAmount: string | undefined, min: number, max: number) {
     return null;
   }
   return amount;
+}
+
+function strictHeading(rawAmount: string | undefined) {
+  const heading = strictNumber(rawAmount, 0, 36);
+  return heading === null ? null : normalizeDegrees(heading * 10);
 }
 
 function clampFinite(value: unknown, min: number, max: number, fallback: number) {

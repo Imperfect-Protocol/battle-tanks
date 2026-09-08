@@ -557,8 +557,8 @@ function useInterpolatedWorld(gameRoom: GameRoom | null): InterpolatedWorld {
       return {
         x: params.x,
         y: params.y,
-        bearing: normalizeDegrees(params.bearing),
-        aim: normalizeDegrees(params.aim),
+        bearing: params.bearing,
+        aim: params.aim,
       };
     },
     tankPosition: (tank: Tank, now: number) => {
@@ -729,8 +729,8 @@ function interpolateParams(a: InterpolatedParams, b: InterpolatedParams, progres
     x: a.x + (b.x - a.x) * progress,
     y: a.y + (b.y - a.y) * progress,
     height: a.height + (b.height - a.height) * progress,
-    bearing: a.bearing + (b.bearing - a.bearing) * progress,
-    aim: a.aim + (b.aim - a.aim) * progress,
+    bearing: interpolateAngle(a.bearing, b.bearing, progress),
+    aim: interpolateAngle(a.aim, b.aim, progress),
   };
 }
 
@@ -818,6 +818,10 @@ function perspectiveSizeForHeight(height: number) {
 
 function normalizeDegrees(degrees: number) {
   return ((degrees % 360) + 360) % 360;
+}
+
+function interpolateAngle(from: number, to: number, progress: number) {
+  return from + shortestAngleDelta(from, to) * progress;
 }
 
 function unwrapAngle(from: number, to: number) {

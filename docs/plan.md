@@ -24,12 +24,13 @@
 ## Commands
 
  - bear <0-360 absolute bearing angle, 0 up/North, 90 right/East, 180 down/South, 270 left/West>
- - move <-100..100 command units, 10 command units per square; negative values move backward>
- - aim <0-360 absolute aiming angle, 0 up/North, 90 right/East, 180 down/South, 270 left/West>
+ - move <-10..10 squares; negative values move backward>
+ - aim <0-360 absolute aiming angle, 0 up/North, 90 right/East, 180 down/South, 270 left/West; holds turret on that target angle>
  - elev <10-60 vertical angle>
  - pow <10-100 cannon power, value above 100 should print error>
  - fire
- - single-letter aliases: b, m, a, e, p, f
+ - ret <return turret to hull bearing and rotate with tank>
+ - single-letter aliases: b, m, a, e, p, f, r
 
 Values out of range should print error
 
@@ -37,32 +38,32 @@ Values out of range should print error
  ## Moving
 
  move should adhere to law of physics, tank have constant acceleration and speed is capped at maximum speed of 3 squares per second.
- Move commands use 10 command units per square, so `move 50` means 5 squares and `move -30` means 3 squares backward.
+Move commands use board squares directly, so `move 5` means 5 squares and `move -3` means 3 squares backward.
  When moving X squares tank should accelerate in current direction of its hull, and at some point should:
  - decelerate if there is no queued move commands
  - continue moving if there is queued move commands
 
 Example
 
-bear 90
-move 50
-bear 180
-move -30
-aim 200
+bear 09
+move 5
+bear 18
+move -3
+aim 20
 elev 30
 pow 100
 fire
 
-Here command queue has "move 50" and "move -30", so acceleration and deceleration should be computed using the signed remaining distance.
+Here command queue has "move 5" and "move -3", so acceleration and deceleration should be computed using the signed remaining distance.
 Tank should start decelerating soon enough to reach 0 at destination point.
 
-If user queues another move command, say "move 30" then algorithm needs to add that to remaining distance, e.g.
+If user queues another move command, say "move 3" then algorithm needs to add that to remaining distance, e.g.
 
-move 50 + move 30 = move 80
+move 5 + move 3 = move 8
 
 already moved 7 ==> then remaining is 8 - 7 = 1
 
-so queueing "move 30" should add 3 squares: 1 + 3 = 4
+so queueing "move 3" should add 3 squares: 1 + 3 = 4
 
 tank should accelerate to reach destination at 4 squares.
 

@@ -26,8 +26,8 @@ const MIN_FIRE_POWER = 10;
 const MAX_FIRE_POWER = 100;
 const MIN_AIM_ELEVATION_DEGREES = 10;
 const MAX_AIM_ELEVATION_DEGREES = 60;
-const MOVE_COMMAND_UNITS_PER_SQUARE = 10;
-const MAX_MOVE_COMMAND_UNITS = 100;
+const MOVE_COMMAND_UNITS_PER_SQUARE = 1;
+const MAX_MOVE_COMMAND_UNITS = 10;
 const MAX_MOVE_DISTANCE_UNITS = (MAX_MOVE_COMMAND_UNITS / MOVE_COMMAND_UNITS_PER_SQUARE) * UNITS_PER_SQUARE;
 const MAX_PROJECTILE_DAMAGE = 35;
 const MIN_PROJECTILE_DAMAGE = 4;
@@ -63,7 +63,8 @@ type StoredCommand =
   | { action: "aim"; bearing: number }
   | { action: "elev"; elevation: number }
   | { action: "pow"; power: number }
-  | { action: "fire" };
+  | { action: "fire" }
+  | { action: "ret" };
 
 type CollisionDetails =
   | { type: "none"; position: { x: number; y: number } }
@@ -137,7 +138,10 @@ export const getRoom = query({
 });
 
 export const listBattles = query({
-  args: { lobbyId: v.optional(v.string()) },
+  args: {
+    lobbyId: v.optional(v.string()),
+    commanderId: v.optional(v.id("commanderProfiles")),
+  },
   returns: v.array(
     v.object({
       _id: v.id("matches"),
@@ -146,11 +150,11 @@ export const listBattles = query({
       status: v.union(
         v.literal("lobby"),
         v.literal("active"),
-        v.literal("finished"),
       ),
       currentTick: v.number(),
       playerCount: v.number(),
       maxPlayers: v.number(),
+      viewerIsPlayer: v.boolean(),
       createdAt: v.number(),
       updatedAt: v.number(),
     }),
@@ -159,9 +163,9 @@ export const listBattles = query({
     const lobbyId = normalizeLobbyId(args.lobbyId);
     const matches = await ctx.db
       .query("matches")
-      .withIndex("by_lobby_status_and_created_at", (q) => q.eq("lobbyId", lobbyId).eq("status", "lobby"))
+      .withIndex("by_lobby_and_created_at", (q) => q.eq("lobbyId", lobbyId))
       .order("desc")
-      .take(25);
+      .take(50);
 
     const rows = [];
     for (const match of matches) {
@@ -174,22 +178,23 @@ export const listBattles = query({
         .withIndex("by_match", (q) => q.eq("matchId", match._id))
         .take(2);
 
-      if (tanks.some((tank) => tank.health <= 0)) {
+      const matchEnd = resolveMatchEnd(players, tanks);
+      if (match.status === "finished" || matchEnd.finished) {
         continue;
       }
-
-      if (players.length >= 2) {
-        continue;
-      }
+      const status: "active" | "lobby" = players.length >= 2 ? "active" : "lobby";
 
       rows.push({
         _id: match._id,
         roomCode: match.roomCode,
         battleName: match.battleName,
-        status: match.status,
+        status,
         currentTick: match.currentTick,
         playerCount: players.length,
         maxPlayers: 2,
+        viewerIsPlayer: args.commanderId
+          ? players.some((player) => player.commanderId === args.commanderId)
+          : false,
         createdAt: match.createdAt,
         updatedAt: match.updatedAt,
       });
@@ -220,13 +225,27 @@ export const createRoom = mutation({
       throw new Error("Battle code already used");
     }
 
-    const existingName = await ctx.db
+    const matchesWithName = await ctx.db
       .query("matches")
       .withIndex("by_lobby_and_battle_name", (q) => q.eq("lobbyId", DEFAULT_LOBBY_ID).eq("battleName", battleName))
-      .first();
+      .take(50);
 
-    if (existingName) {
-      throw new Error("Battle name already used");
+    for (const matchWithName of matchesWithName) {
+      if (matchWithName.status === "finished") {
+        continue;
+      }
+      const tanks = await ctx.db
+        .query("tanks")
+        .withIndex("by_match", (q) => q.eq("matchId", matchWithName._id))
+        .take(2);
+      const players = await ctx.db
+        .query("players")
+        .withIndex("by_match", (q) => q.eq("matchId", matchWithName._id))
+        .take(2);
+
+      if (!resolveMatchEnd(players, tanks).finished) {
+        throw new Error("Battle already exists");
+      }
     }
 
     const boardId = await ensureDefaultBoard(ctx, now);
@@ -296,7 +315,7 @@ export const joinRoom = mutation({
     const players = await ctx.db
       .query("players")
       .withIndex("by_match", (q) => q.eq("matchId", match._id))
-      .collect();
+      .take(3);
 
     const existingPlayer = players.find((player) => player.commanderId === commander.commanderId);
     if (existingPlayer) {
@@ -665,6 +684,7 @@ async function applyCommand(
     const result = stepTowardBearing(angleFromDirection(tank.turretDirection), parsed.bearing);
     await ctx.db.patch(tank._id, {
       turretDirection: result.bearing,
+      turretLocked: false,
       updatedAt: now,
     });
     return result.complete;
@@ -685,6 +705,16 @@ async function applyCommand(
       updatedAt: now,
     });
     return true;
+  }
+
+  if (parsed.action === "ret") {
+    const result = stepTowardBearing(angleFromDirection(tank.turretDirection), angleFromDirection(tank.hullDirection));
+    await ctx.db.patch(tank._id, {
+      turretDirection: result.bearing,
+      turretLocked: result.complete,
+      updatedAt: now,
+    });
+    return result.complete;
   }
 
   if (parsed.action === "move") {
@@ -1057,11 +1087,26 @@ function normalizeOrderCommand(command: string): string[] {
   }
 
   const normalized = command.trim().toLowerCase().replace(/\s+/g, " ");
-  const parsed = parseStoredCommand(normalized);
+  const parsed = parseInputCommand(normalized);
   if (!parsed) {
     return [];
   }
   return [serializeCommand(parsed)];
+}
+
+function parseInputCommand(command: string): StoredCommand | null {
+  const parsed = parseStoredCommand(command);
+  if (!parsed) {
+    return null;
+  }
+
+  if (parsed.action === "bear" || parsed.action === "aim") {
+    const [, rawAmount] = command.trim().toLowerCase().replace(/\s+/g, " ").split(" ");
+    const bearing = strictHeading(rawAmount);
+    return bearing === null ? null : { action: parsed.action, bearing: roundForStorage(bearing) };
+  }
+
+  return parsed;
 }
 
 function parseStoredCommand(command: string): StoredCommand | null {
@@ -1124,6 +1169,14 @@ function parseStoredCommand(command: string): StoredCommand | null {
     return { action };
   }
 
+  if (action === "ret") {
+    if (rawAmount !== undefined || rawSecondAmount !== undefined) {
+      return null;
+    }
+
+    return { action };
+  }
+
   return null;
 }
 
@@ -1146,6 +1199,9 @@ function expandCommandAction(action: string | undefined) {
   if (action === "f") {
     return "fire";
   }
+  if (action === "r") {
+    return "ret";
+  }
   return action;
 }
 
@@ -1165,6 +1221,9 @@ function serializeCommand(command: StoredCommand) {
   if (command.action === "pow") {
     return `pow ${roundForStorage(command.power)}`;
   }
+  if (command.action === "ret") {
+    return command.action;
+  }
   return "fire";
 }
 
@@ -1178,6 +1237,11 @@ function strictNumber(rawAmount: string | undefined, min: number, max: number) {
     return null;
   }
   return amount;
+}
+
+function strictHeading(rawAmount: string | undefined) {
+  const heading = strictNumber(rawAmount, 0, 36);
+  return heading === null ? null : normalizeDegrees(heading * 10);
 }
 
 function vectorFromBearing(degrees: number, magnitude: number) {
