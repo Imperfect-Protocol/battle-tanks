@@ -66,6 +66,10 @@ type StoredCommand =
   | { action: "fire" }
   | { action: "ret" };
 
+type OrderQueueType = "move" | "bearing" | "cannon";
+
+const ORDER_QUEUE_TYPES: OrderQueueType[] = ["move", "bearing", "cannon"];
+
 export const listLobbies = query({
   args: {},
   returns: v.object({
@@ -260,18 +264,26 @@ export const issueCommands = mutation({
       throw new Error("Battle already finished");
     }
 
-    const commands: string[] = [];
+    const commandsByQueue = emptyCommandQueues();
     for (const command of args.commands) {
       const normalizedCommands = normalizeOrderCommand(command);
       if (normalizedCommands.length === 0) {
         throw new Error("Incorrect command");
       }
-      commands.push(...normalizedCommands);
+      for (const normalizedCommand of normalizedCommands) {
+        const parsed = parseStoredCommand(normalizedCommand);
+        if (!parsed) {
+          throw new Error("Incorrect command");
+        }
+        commandsByQueue[queueTypeForCommand(parsed)].push(normalizedCommand);
+      }
     }
 
+    const queuedCommands = compressCommandQueues(commandsByQueue);
+    const acceptedCommands = ORDER_QUEUE_TYPES.flatMap((queueType) => queuedCommands[queueType]);
     const activeMoveRemaining = clampFinite(tank.moveRemaining, -MAX_MOVE_DISTANCE_UNITS * 4, MAX_MOVE_DISTANCE_UNITS * 4, 0);
-    if (Math.abs(activeMoveRemaining) > 0.5 && commands.every((command) => command.startsWith("move "))) {
-      const extraDistance = commands.reduce((total, command) => {
+    if (Math.abs(activeMoveRemaining) > 0.5 && queuedCommands.move.length > 0) {
+      const extraDistance = queuedCommands.move.reduce((total, command) => {
         const parsed = parseStoredCommand(command);
         return parsed?.action === "move" ? total + moveCommandUnitsToDistance(parsed.units) : total;
       }, 0);
@@ -279,21 +291,29 @@ export const issueCommands = mutation({
         moveRemaining: activeMoveRemaining + extraDistance,
         updatedAt: now,
       });
-      return { accepted: commands };
+      queuedCommands.move = [];
     }
 
-    await ctx.db.insert("orders", {
-      matchId: match._id,
-      playerId: player._id,
-      tankId: tank._id,
-      commands,
-      cursor: 0,
-      status: "queued",
-      createdAt: now,
-      updatedAt: now,
-    });
+    for (const queueType of ORDER_QUEUE_TYPES) {
+      const commands = queuedCommands[queueType];
+      if (commands.length === 0) {
+        continue;
+      }
 
-    return { accepted: commands };
+      await ctx.db.insert("orders", {
+        matchId: match._id,
+        playerId: player._id,
+        tankId: tank._id,
+        queueType,
+        commands,
+        cursor: 0,
+        status: "queued",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    return { accepted: acceptedCommands };
   },
 });
 
@@ -747,6 +767,83 @@ function normalizeRoom(roomCode: string) {
 
 function normalizeLobbyId(lobbyId: string | undefined) {
   return lobbyId?.trim().toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 24) || DEFAULT_LOBBY_ID;
+}
+
+function emptyCommandQueues() {
+  return {
+    move: [],
+    bearing: [],
+    cannon: [],
+  } as Record<OrderQueueType, string[]>;
+}
+
+function compressCommandQueues(commandsByQueue: Record<OrderQueueType, string[]>) {
+  return {
+    move: compressMoveCommands(commandsByQueue.move),
+    bearing: compressBearingCommands(commandsByQueue.bearing),
+    cannon: compressCannonCommands(commandsByQueue.cannon),
+  } as Record<OrderQueueType, string[]>;
+}
+
+function compressMoveCommands(commands: string[]) {
+  return commands;
+}
+
+function compressBearingCommands(commands: string[]) {
+  const lastCommand = commands.at(-1);
+  return lastCommand ? [lastCommand] : [];
+}
+
+function compressCannonCommands(commands: string[]) {
+  const compressed: string[] = [];
+  const pending: Partial<Record<"aim" | "elev" | "pow" | "ret", string>> = {};
+
+  const flushPending = () => {
+    for (const action of ["aim", "ret", "elev", "pow"] as const) {
+      const command = pending[action];
+      if (command) {
+        compressed.push(command);
+        delete pending[action];
+      }
+    }
+  };
+
+  for (const command of commands) {
+    const parsed = parseStoredCommand(command);
+    if (!parsed) {
+      continue;
+    }
+
+    if (parsed.action === "fire") {
+      flushPending();
+      compressed.push(command);
+      continue;
+    }
+
+    if (parsed.action === "aim" || parsed.action === "ret") {
+      delete pending.aim;
+      delete pending.ret;
+      pending[parsed.action] = command;
+      continue;
+    }
+
+    if (parsed.action === "elev" || parsed.action === "pow") {
+      pending[parsed.action] = command;
+    }
+  }
+
+  flushPending();
+  return compressed;
+}
+
+function queueTypeForCommand(command: StoredCommand): OrderQueueType {
+  if (command.action === "move") {
+    return "move";
+  }
+  if (command.action === "bear") {
+    return "bearing";
+  }
+  return "cannon";
 }
 
 function normalizeDegrees(degrees: number) {

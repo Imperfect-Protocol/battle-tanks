@@ -108,6 +108,7 @@ export default defineSchema({
     matchId: v.id("matches"),
     playerId: v.id("players"),
     tankId: v.id("tanks"),
+    queueType: v.optional(v.union(v.literal("move"), v.literal("bearing"), v.literal("cannon"))),
     commands: v.array(v.string()),
     cursor: v.number(),
     status: v.union(

@@ -66,6 +66,10 @@ type StoredCommand =
   | { action: "fire" }
   | { action: "ret" };
 
+type OrderQueueType = "move" | "bearing" | "cannon";
+
+const ORDER_QUEUE_TYPES: OrderQueueType[] = ["move", "bearing", "cannon"];
+
 type CollisionDetails =
   | { type: "none"; position: { x: number; y: number } }
   | { type: "wall"; position: { x: number; y: number }; normal: { x: number; y: number }; penetration: number };
@@ -480,22 +484,29 @@ export const runNextTick = mutation({
 });
 
 async function queuePlayerCommands(ctx: any, match: any, player: any, tank: any, rawCommands: string[], now: number) {
-  const commands: string[] = [];
+  const commandsByQueue = emptyCommandQueues();
   for (const command of rawCommands) {
     const normalizedCommands = normalizeOrderCommand(command);
     if (normalizedCommands.length === 0) {
       throw new Error("Incorrect command");
     }
-    commands.push(...normalizedCommands);
+    for (const normalizedCommand of normalizedCommands) {
+      const parsed = parseStoredCommand(normalizedCommand);
+      if (!parsed) {
+        throw new Error("Incorrect command");
+      }
+      commandsByQueue[queueTypeForCommand(parsed)].push(normalizedCommand);
+    }
   }
 
-  if (commands.length === 0) {
+  const queuedCommands = compressCommandQueues(commandsByQueue);
+  if (ORDER_QUEUE_TYPES.every((queueType) => queuedCommands[queueType].length === 0)) {
     return;
   }
 
   const activeMoveRemaining = clampFinite(tank.moveRemaining, -MAX_MOVE_DISTANCE_UNITS * 4, MAX_MOVE_DISTANCE_UNITS * 4, 0);
-  if (Math.abs(activeMoveRemaining) > 0.5 && commands.every((command) => command.startsWith("move "))) {
-    const extraDistance = commands.reduce((total, command) => {
+  if (Math.abs(activeMoveRemaining) > 0.5 && queuedCommands.move.length > 0) {
+    const extraDistance = queuedCommands.move.reduce((total, command) => {
       const parsed = parseStoredCommand(command);
       return parsed?.action === "move" ? total + moveCommandUnitsToDistance(parsed.units) : total;
     }, 0);
@@ -503,19 +514,41 @@ async function queuePlayerCommands(ctx: any, match: any, player: any, tank: any,
       moveRemaining: activeMoveRemaining + extraDistance,
       updatedAt: now,
     });
-    return;
+    queuedCommands.move = [];
   }
 
-  await ctx.db.insert("orders", {
-    matchId: match._id,
-    playerId: player._id,
-    tankId: tank._id,
-    commands,
-    cursor: 0,
-    status: "queued",
-    createdAt: now,
-    updatedAt: now,
-  });
+  if (queuedCommands.bearing.length > 0 || queuedCommands.cannon.length > 0) {
+    const existingOrders = await ctx.db
+      .query("orders")
+      .withIndex("by_player", (q: any) => q.eq("playerId", player._id))
+      .take(50);
+
+    if (queuedCommands.bearing.length > 0) {
+      await completeActiveOrdersForQueue(ctx, existingOrders, tank._id, "bearing", now);
+    }
+    if (queuedCommands.cannon.length > 0) {
+      await completeActiveOrdersForQueue(ctx, existingOrders, tank._id, "cannon", now);
+    }
+  }
+
+  for (const queueType of ORDER_QUEUE_TYPES) {
+    const commands = queuedCommands[queueType];
+    if (commands.length === 0) {
+      continue;
+    }
+
+    await ctx.db.insert("orders", {
+      matchId: match._id,
+      playerId: player._id,
+      tankId: tank._id,
+      queueType,
+      commands,
+      cursor: 0,
+      status: "queued",
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
 }
 
 async function advanceSinglePlayerTick(ctx: any, match: any, player: any, observedEvents: any[], now: number) {
@@ -547,33 +580,38 @@ async function advanceSinglePlayerTick(ctx: any, match: any, player: any, observ
   }
 
   if (latestTank && latestTank.health > 0) {
-    const order = orders.find(
-      (candidate: any) => candidate.tankId === latestTank._id && candidate.status !== "complete",
-    );
-    const command = order ? order.commands[order.cursor] : undefined;
-    const commandComplete = await applyCommand(
-      ctx,
-      board,
-      latestTank,
-      command,
-      order ? `${order._id}:${order.cursor}` : undefined,
-      now,
-    );
+    for (const queueType of ORDER_QUEUE_TYPES) {
+      latestTank = await ctx.db.get(tank._id);
+      if (!latestTank || latestTank.health <= 0) {
+        break;
+      }
 
-    if (order && commandComplete) {
-      const cursor = order.cursor + 1;
-      await ctx.db.patch(order._id, {
-        cursor,
-        status: cursor >= order.commands.length ? "complete" : "running",
-        updatedAt: now,
-      });
+      const order = activeOrderForQueue(orders, latestTank._id, queueType);
+      const command = order ? order.commands[order.cursor] : undefined;
+      const commandComplete = await applyCommand(
+        ctx,
+        board,
+        latestTank,
+        command,
+        order ? `${order._id}:${order.cursor}` : undefined,
+        now,
+      );
+
+      if (order && commandComplete) {
+        const cursor = order.cursor + 1;
+        await ctx.db.patch(order._id, {
+          cursor,
+          status: cursor >= order.commands.length ? "complete" : "running",
+          updatedAt: now,
+        });
+      }
     }
 
-    const tankAfterCommand = await ctx.db.get(tank._id);
-    if (tankAfterCommand) {
-      await advanceTankMotion(ctx, board, orders, tankAfterCommand, player.lastTickAt ?? 0, now);
+    const tankAfterCommands = await ctx.db.get(tank._id);
+    if (tankAfterCommands) {
+      await advanceTankMotion(ctx, board, orders, tankAfterCommands, player.lastTickAt ?? 0, now);
       const tankAfterMotion = await ctx.db.get(tank._id);
-      latestTank = tankAfterMotion ?? tankAfterCommand;
+      latestTank = tankAfterMotion ?? tankAfterCommands;
     }
   }
 
@@ -1063,6 +1101,22 @@ async function abortTankOrders(ctx: any, orders: any[], tankIds: any[], now: num
   }
 }
 
+function activeOrderForQueue(orders: any[], tankId: any, queueType: OrderQueueType) {
+  return orders
+    .filter((order) => order.tankId === tankId && order.status !== "complete" && orderQueueType(order) === queueType)
+    .sort((left, right) => (left.createdAt ?? left._creationTime ?? 0) - (right.createdAt ?? right._creationTime ?? 0))[0];
+}
+
+function orderQueueType(order: any): OrderQueueType {
+  if (order.queueType === "move" || order.queueType === "bearing" || order.queueType === "cannon") {
+    return order.queueType;
+  }
+
+  const command = order.commands[order.cursor] ?? order.commands[0];
+  const parsed = command ? parseStoredCommand(command) : null;
+  return parsed ? queueTypeForCommand(parsed) : "cannon";
+}
+
 function normalizeRoom(roomCode: string) {
   return roomCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8) || "Room";
 }
@@ -1079,6 +1133,83 @@ function normalizeLobbyId(lobbyId: string | undefined) {
 
 function cleanBattleName(name: string | undefined) {
   return name?.trim().slice(0, 48) || "Battle";
+}
+
+function emptyCommandQueues() {
+  return {
+    move: [],
+    bearing: [],
+    cannon: [],
+  } as Record<OrderQueueType, string[]>;
+}
+
+function compressCommandQueues(commandsByQueue: Record<OrderQueueType, string[]>) {
+  return {
+    move: compressMoveCommands(commandsByQueue.move),
+    bearing: compressBearingCommands(commandsByQueue.bearing),
+    cannon: compressCannonCommands(commandsByQueue.cannon),
+  } as Record<OrderQueueType, string[]>;
+}
+
+function compressMoveCommands(commands: string[]) {
+  return commands;
+}
+
+function compressBearingCommands(commands: string[]) {
+  const lastCommand = commands.at(-1);
+  return lastCommand ? [lastCommand] : [];
+}
+
+function compressCannonCommands(commands: string[]) {
+  const compressed: string[] = [];
+  const pending: Partial<Record<"aim" | "elev" | "pow" | "ret", string>> = {};
+
+  const flushPending = () => {
+    for (const action of ["aim", "ret", "elev", "pow"] as const) {
+      const command = pending[action];
+      if (command) {
+        compressed.push(command);
+        delete pending[action];
+      }
+    }
+  };
+
+  for (const command of commands) {
+    const parsed = parseStoredCommand(command);
+    if (!parsed) {
+      continue;
+    }
+
+    if (parsed.action === "fire") {
+      flushPending();
+      compressed.push(command);
+      continue;
+    }
+
+    if (parsed.action === "aim" || parsed.action === "ret") {
+      delete pending.aim;
+      delete pending.ret;
+      pending[parsed.action] = command;
+      continue;
+    }
+
+    if (parsed.action === "elev" || parsed.action === "pow") {
+      pending[parsed.action] = command;
+    }
+  }
+
+  flushPending();
+  return compressed;
+}
+
+function queueTypeForCommand(command: StoredCommand): OrderQueueType {
+  if (command.action === "move") {
+    return "move";
+  }
+  if (command.action === "bear") {
+    return "bearing";
+  }
+  return "cannon";
 }
 
 function normalizeOrderCommand(command: string): string[] {
