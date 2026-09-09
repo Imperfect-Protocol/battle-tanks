@@ -52,18 +52,17 @@ npx convex env set AUTH_RESEND_KEY=<resend-api-key>
 
 Without `AUTH_RESEND_KEY`, local development logs the reset link in the Convex output.
 
-## Running on GitHub Codespaces
-
-See the [GitHub Codespaces Guide](docs/GITHUB_CODESPACES.md) for detailed setup instructions.
-
-## Convex
+### Convex
 
 **Convex is primarily PaaS**: it provides a ready-made platform/backend for your application, including database, functions, and managed infrastructure.
    * **IaaS (Infrastructure as a Service)** → you receive infrastructure: servers, networks, storage. Example: AWS EC2.
    * **PaaS (Platform as a Service)** → you receive a ready-made platform to **run your application**, without managing infrastructure. Example: Heroku.
    * **SaaS (Software as a Service)** → you receive **ready-to-use software**. Example: Gmail.
 
+## Running on GitHub Codespaces
+
+See the [GitHub Codespaces Guide](docs/GITHUB_CODESPACES.md) for detailed setup instructions.
+
 ## Commit Signatures
 
 This repository requires all commits to have verified signatures. See the [GitHub Commit Signatures Guide](docs/GITHUB_COMMIT_SIGNATURES.md) for step-by-step instructions on setting up SSH-based commit signing.
-
