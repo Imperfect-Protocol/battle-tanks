@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "burning-token": {
+      "type": "http",
+      "url": "https://app.burningtoken.dev/api/mcp"
+    }
+  }
+}

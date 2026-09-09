@@ -197,6 +197,31 @@ button {
   text-transform: uppercase;
 }
 
+.app-nav {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  margin-left: auto;
+}
+
+.app-nav a,
+.app-nav button {
+  background: transparent;
+  border: 0;
+  color: #86ffd1;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 0;
+  text-transform: uppercase;
+}
+
+.app-nav a:hover,
+.app-nav button:hover {
+  color: #effff9;
+}
+
 .commander-chip,
 .room-chip {
   align-items: center;
@@ -257,6 +282,12 @@ button {
   box-shadow:
     inset 0 0 22px rgba(36, 247, 167, 0.05),
     0 0 28px rgba(36, 247, 167, 0.08);
+}
+
+.placeholder-panel {
+  margin: 22px auto 0;
+  max-width: 1180px;
+  min-height: 240px;
 }
 
 .sign-in-panel {
@@ -1233,6 +1264,10 @@ button {
   .panel-heading {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .app-nav {
+    margin-left: 0;
   }
 
   .page-heading h1,

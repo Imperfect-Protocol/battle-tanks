@@ -4,6 +4,7 @@ import { CommanderProvider, useCommander } from "./CommanderContext";
 import { BattlePage } from "../pages/BattlePage";
 import { LobbyPage } from "../pages/LobbyPage";
 import { MainLobbyPage } from "../pages/MainLobbyPage";
+import { PlaceholderPage } from "../pages/PlaceholderPage";
 import { SignInPage } from "../pages/SignInPage";
 import { SplashPage } from "../pages/SplashPage";
 
@@ -27,6 +28,22 @@ export default function App() {
           element={
             <RequireCommander>
               <LobbyPage />
+            </RequireCommander>
+          }
+        />
+        <Route
+          path="/leaderboard"
+          element={
+            <RequireCommander>
+              <PlaceholderPage eyebrow="Leaderboard" title="Leaderboard" />
+            </RequireCommander>
+          }
+        />
+        <Route
+          path="/settings"
+          element={
+            <RequireCommander>
+              <PlaceholderPage eyebrow="Settings" title="Settings" />
             </RequireCommander>
           }
         />
