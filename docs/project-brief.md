@@ -7,11 +7,11 @@ Battle Tanks is a small realtime multiplayer tactics game built with a Vite Reac
 Players join the same room, each controls a tank, and each submits a short command script such as:
 
 ```text
-bear 90
-move 50
-bear 180
-move -30
-aim 170
+bear 09
+move 5
+bear 18
+move -3
+aim 17
 elev 30
 pow 80
 fire
@@ -25,13 +25,13 @@ The first shippable version is intentionally simple:
 - two player slots
 - one tank per player
 - one ammunition type: missile
-- command scripts with absolute bearing, movement, aim, elevation, power, and fire commands: `bear 90`, `move -30`, `aim 170`, `elev 30`, `pow 80`, and `fire`
+- command scripts with heading bearing, movement, aim, elevation, power, fire, and turret return commands: `bear 09`, `move -3`, `aim 17`, `elev 30`, `pow 80`, `fire`, and `ret`
 - shared state synced through Convex
 - frontend deployed through Convex Static Hosting on `convex.site`
 
-The arena is 12 by 12 squares, and each square is stored as 1000 by 1000 internal game units. Tank and projectile locations can sit anywhere in the 12000 by 12000 unit coordinate space while the border wall still occupies the outer square of the arena. The match ticks at 25 frames per second. Movement uses acceleration and deceleration, capped at three squares per second. Movement commands use 10 command units per square, so `move 30` travels three squares forward and `move -30` travels three squares backward in the current hull bearing. Hull and turret rotation also happen over time: a full 360-degree rotation takes three seconds.
+The arena is 12 by 12 squares, and each square is stored as 1000 by 1000 internal game units. Tank and projectile locations can sit anywhere in the 12000 by 12000 unit coordinate space while the border wall still occupies the outer square of the arena. The match ticks at 25 frames per second. Movement uses acceleration and deceleration, capped at three squares per second. Movement commands use board squares directly, so `move 3` travels three squares forward and `move -3` travels three squares backward in the current hull bearing. Hull and turret rotation also happen over time: a full 360-degree rotation takes three seconds.
 
-Hull, turret, and launch angles are continuous absolute bearings: `0` is north, `90` is east, `180` is south, and `270` is west. The `bear` command rotates the hull toward an absolute bearing. The `aim` command sets the turret's absolute horizontal bearing, `elev` sets the vertical launch angle, `pow` sets cannon power, and `fire` launches using the current cannon settings. Each command also has a single-letter abbreviation: `b`, `m`, `a`, `e`, `p`, and `f`. Values outside the allowed command ranges are rejected. At 100% power, launch velocity is calculated so 30 degrees flies about 8 squares, 45 degrees about 6 squares, and 60 degrees about 4 squares, with intermediate angles interpolated. Projectile impacts briefly become a large yellow-orange explosion. Impacts use a radius around the target tank center; damage is strongest at the center and falls off with a normal-distribution curve, with the hit radius tied to that damage curve's interquartile width.
+Hull and turret headings use two-digit compass notation: `00` is north, `09` is east, `18` is south, and `27` is west. The `bear` command rotates the hull toward an absolute heading. The `aim` command sets the turret's absolute horizontal heading and holds it on that target angle, `elev` sets the vertical launch angle, `pow` sets cannon power, and `fire` launches using the current cannon settings. `ret` returns the turret to the hull bearing and then makes it rotate with the tank again. Each command also has a single-letter abbreviation: `b`, `m`, `a`, `e`, `p`, `f`, and `r`. Values outside the allowed command ranges are rejected. At 100% power, launch velocity is calculated so 30 degrees flies about 8 squares, 45 degrees about 6 squares, and 60 degrees about 4 squares, with intermediate angles interpolated. Projectile impacts briefly become a large yellow-orange explosion. Impacts use a radius around the target tank center; damage is strongest at the center and falls off with a normal-distribution curve, with the hit radius tied to that damage curve's interquartile width.
 
 The future version can add better maps, obstacles, richer projectiles, simultaneous turns, AI commanders, and smarter conditional orders.
 

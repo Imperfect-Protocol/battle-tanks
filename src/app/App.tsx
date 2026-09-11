@@ -6,6 +6,7 @@ import { LobbyPage } from "../pages/LobbyPage";
 import { MainLobbyPage } from "../pages/MainLobbyPage";
 import { SignInPage } from "../pages/SignInPage";
 import { SplashPage } from "../pages/SplashPage";
+import { StandByPage } from "../pages/StandByPage";
 
 export default function App() {
   return (
@@ -27,6 +28,14 @@ export default function App() {
           element={
             <RequireCommander>
               <LobbyPage />
+            </RequireCommander>
+          }
+        />
+        <Route
+          path="/battle/:roomCode/stand-by"
+          element={
+            <RequireCommander>
+              <StandByPage />
             </RequireCommander>
           }
         />

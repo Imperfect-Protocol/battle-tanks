@@ -3,25 +3,31 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { useCommander } from "../app/CommanderContext";
 import { BattleBoard } from "../components/BattleBoard";
 import { BattleConsole } from "../components/BattleConsole";
+import { NavigationRose } from "../components/NavigationRose";
 import { useGameRoom } from "../hooks/useGameRoom";
+import { closeCurrentTab } from "../libs/browserTab";
 
 const GAME_TICK_MS = 40;
 const GAME_OVER_DELAY_MS = 3000;
-const HELP_TEXT = "COMMANDS: bear/b <0-360>, move/m <-100..100>, aim/a <0-360>, elev/e <10-60>, pow/p <10-100>, fire/f";
+const STANDBY_AFTER_MS = 2 * 60 * 1000;
+const HELP_TEXT = "COMMANDS: bear/b <00-36>, move/m <-10..10> squares, aim/a <00-36>, elev/e <10-60>, pow/p <10-100>, fire/f, ret/r";
 
 export function BattlePage() {
   const navigate = useNavigate();
   const { roomCode = "" } = useParams();
   const [searchParams] = useSearchParams();
   const { displayName, commanderId } = useCommander();
-  const [battleName, setBattleName] = useState("Battle");
+  const [pendingRoomCode] = useState(createRoomCode);
+  const isNewBattleRoute = roomCode.toLowerCase() === "new";
+  const cleanRoomCode = isNewBattleRoute ? pendingRoomCode : roomCode.toUpperCase();
+  const [battleName, setBattleName] = useState("");
   const [battleNameError, setBattleNameError] = useState("");
   const joinAttemptedRef = useRef(false);
   const tickInFlightRef = useRef<Promise<unknown> | null>(null);
-  const cleanRoomCode = roomCode.toUpperCase();
   const { gameRoom, createRoom, joinRoom, submitScript, tickPlayer } = useGameRoom(cleanRoomCode);
   const tankByPlayer = useMemo(() => new Map(gameRoom?.tanks.map((tank) => [tank.playerId, tank]) ?? []), [gameRoom]);
   const localPlayer = gameRoom?.players.find((player) => player.commanderId === commanderId);
+  const localTank = localPlayer ? tankByPlayer.get(localPlayer.id) : null;
   const observedEvents = useMemo(
     () =>
       gameRoom?.events
@@ -44,7 +50,7 @@ export function BattlePage() {
   const ownsClock = Boolean(localPlayer);
   const roomExists = Boolean(gameRoom?.match);
   const hasJoinedRoom = Boolean(localPlayer);
-  const isCreateRoute = searchParams.get("create") === "1";
+  const isCreateRoute = isNewBattleRoute || searchParams.get("create") === "1";
   const isJoinRoute = searchParams.get("join") === "1";
   const destroyedTank = gameRoom?.tanks.find((tank) => tank.health <= 0);
   const destroyedPlayer = gameRoom?.players.find((player) => player.id === destroyedTank?.playerId);
@@ -76,6 +82,38 @@ export function BattlePage() {
 
     return () => window.clearInterval(timer);
   }, [commanderId, gameRoom?.match, observedEvents, ownsClock, tickPlayer]);
+
+  useEffect(() => {
+    if (!gameRoom?.match || showGameOver) {
+      return;
+    }
+
+    let lastActivityAt = Date.now();
+    let timer = 0;
+    const recordActivity = () => {
+      lastActivityAt = Date.now();
+    };
+    const checkIdle = () => {
+      if (Date.now() - lastActivityAt >= STANDBY_AFTER_MS) {
+        navigate(`/battle/${cleanRoomCode}/stand-by`, { replace: true });
+        return;
+      }
+      timer = window.setTimeout(checkIdle, 1000);
+    };
+    const events = ["keydown", "mousedown", "mousemove", "pointerdown", "touchstart", "wheel"];
+
+    for (const eventName of events) {
+      window.addEventListener(eventName, recordActivity, { passive: true });
+    }
+    timer = window.setTimeout(checkIdle, 1000);
+
+    return () => {
+      window.clearTimeout(timer);
+      for (const eventName of events) {
+        window.removeEventListener(eventName, recordActivity);
+      }
+    };
+  }, [cleanRoomCode, gameRoom?.match, navigate, showGameOver]);
 
   useEffect(() => {
     if (!isJoinRoute || !roomExists || hasJoinedRoom || joinAttemptedRef.current) {
@@ -112,8 +150,8 @@ export function BattlePage() {
       await createRoom({ roomCode: cleanRoomCode, commanderId, battleName });
       navigate(`/battle/${cleanRoomCode}`, { replace: true });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Battle name already used";
-      setBattleNameError(message.includes("Battle name") ? "Battle name already used" : message);
+      const message = error instanceof Error ? error.message : "Battle already exists";
+      setBattleNameError(message.includes("already") ? "Battle already exists" : message);
     }
   };
 
@@ -132,7 +170,7 @@ export function BattlePage() {
   };
 
   const closeBattleTab = () => {
-    window.close();
+    closeCurrentTab();
     window.setTimeout(() => {
       if (!window.closed) {
         navigate("/lobbies/pvp");
@@ -182,6 +220,7 @@ export function BattlePage() {
                   <span>Name</span>
                   <input
                     autoFocus
+                    placeholder="Battle"
                     value={battleName}
                     onChange={(event) => {
                       setBattleName(event.target.value);
@@ -230,7 +269,10 @@ export function BattlePage() {
         </div>
 
         {hasJoinedRoom && gameRoom?.ready && (
-          <BattleConsole commanderName={displayName} roomCode={cleanRoomCode} onCommand={submitCommand} />
+          <aside className="battle-control-stack">
+            <BattleConsole commanderName={displayName} roomCode={cleanRoomCode} onCommand={submitCommand} />
+            <NavigationRose tank={localTank} />
+          </aside>
         )}
       </section>
     </main>
@@ -254,6 +296,13 @@ function statusLabel(status: string | undefined, ready: boolean) {
   return "Waiting";
 }
 
+function createRoomCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const values = new Uint8Array(6);
+  crypto.getRandomValues(values);
+  return Array.from(values, (value) => alphabet[value % alphabet.length]).join("");
+}
+
 function describeCommand(command: string) {
   const commands = command
     .split(/[;,\n]+/)
@@ -273,11 +322,11 @@ function describeSingleCommand(command: string) {
   const amount = Number(rawAmount);
 
   if (action === "bear" && Number.isFinite(amount)) {
-    return `Bearing ${amount} degrees`;
+    return `Bearing ${formatHeadingAmount(amount)} degrees`;
   }
 
   if (action === "aim" && Number.isFinite(amount)) {
-    return `Aim ${amount} degrees`;
+    return `Aim ${formatHeadingAmount(amount)} degrees`;
   }
 
   if (action === "elev" && Number.isFinite(amount)) {
@@ -289,12 +338,16 @@ function describeSingleCommand(command: string) {
   }
 
   if (action === "move" && Number.isFinite(amount)) {
-    const squares = Math.abs(amount) / 10;
+    const squares = Math.abs(amount);
     return `Move ${squares} squares ${amount < 0 ? "backward" : "forward"}`;
   }
 
   if (action === "fire") {
     return "Fire";
+  }
+
+  if (action === "ret") {
+    return "Turret returning to hull bearing";
   }
 
   return "Accepted";
@@ -319,5 +372,16 @@ function expandCommandAction(action: string | undefined) {
   if (action === "f") {
     return "fire";
   }
+  if (action === "r") {
+    return "ret";
+  }
   return action;
+}
+
+function formatHeadingAmount(amount: number) {
+  return normalizeDegrees(amount * 10);
+}
+
+function normalizeDegrees(degrees: number) {
+  return ((degrees % 360) + 360) % 360;
 }

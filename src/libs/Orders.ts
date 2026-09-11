@@ -4,7 +4,8 @@ export type Command =
   | `aim ${number}`
   | `elev ${number}`
   | `pow ${number}`
-  | "fire";
+  | "fire"
+  | "ret";
 
 export class Orders {
   constructor(readonly commands: Command[], readonly invalidCommands: string[] = []) {}
@@ -49,16 +50,16 @@ function normalizeCommand(command: string): Command[] | null {
   }
 
   if (action === "bear") {
-    const bearing = strictNumber(rawAmount, 0, 360);
+    const bearing = strictHeading(rawAmount);
     if (rawSecondAmount !== undefined) {
       return null;
     }
 
-    return bearing === null ? null : [`bear ${roundForStorage(normalizeDegrees(bearing))}`];
+    return bearing === null ? null : [`bear ${roundForStorage(bearing)}`];
   }
 
   if (action === "move") {
-    const units = strictNumber(rawAmount, -100, 100);
+    const units = strictNumber(rawAmount, -10, 10);
     if (units === null || rawSecondAmount !== undefined) {
       return null;
     }
@@ -67,12 +68,12 @@ function normalizeCommand(command: string): Command[] | null {
   }
 
   if (action === "aim") {
-    const bearing = strictNumber(rawAmount, 0, 360);
+    const bearing = strictHeading(rawAmount);
     if (bearing === null || rawSecondAmount !== undefined) {
       return null;
     }
 
-    return [`aim ${roundForStorage(normalizeDegrees(bearing))}`];
+    return [`aim ${roundForStorage(bearing)}`];
   }
 
   if (action === "elev") {
@@ -101,6 +102,14 @@ function normalizeCommand(command: string): Command[] | null {
     return ["fire"];
   }
 
+  if (action === "ret") {
+    if (rawAmount !== undefined || rawSecondAmount !== undefined) {
+      return null;
+    }
+
+    return [action];
+  }
+
   return null;
 }
 
@@ -123,6 +132,9 @@ function expandCommandAction(action: string | undefined) {
   if (action === "f") {
     return "fire";
   }
+  if (action === "r") {
+    return "ret";
+  }
   return action;
 }
 
@@ -141,6 +153,11 @@ function strictNumber(rawAmount: string | undefined, min: number, max: number) {
   }
 
   return amount;
+}
+
+function strictHeading(rawAmount: string | undefined) {
+  const heading = strictNumber(rawAmount, 0, 36);
+  return heading === null ? null : normalizeDegrees(heading * 10);
 }
 
 function normalizeDegrees(degrees: number) {

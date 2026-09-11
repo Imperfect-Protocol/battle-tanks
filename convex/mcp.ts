@@ -72,7 +72,7 @@ export const tools: McpToolRegistration[] = [
   }),
   defineMcpMutation({
     name: "battle_issue_commands",
-    description: "Queue or extend tank commands for the AI's own tank. Commands support semicolon-separated input: bear/b, move/m, aim/a, elev/e, pow/p, fire/f.",
+    description: "Queue or extend tank commands for the AI's own tank. Commands support semicolon-separated input: bear/b <00-36>, move/m <-10..10> squares, aim/a <00-36> to hold absolute turret aim, elev/e, pow/p, fire/f, ret/r to return turret to hull bearing.",
     fn: api.mcpGame.issueCommands,
     args: {
       roomCode: v.string(),
