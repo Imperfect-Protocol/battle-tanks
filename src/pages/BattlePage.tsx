@@ -5,7 +5,7 @@ import { BattleBoard } from "../components/BattleBoard";
 import { BattleConsole } from "../components/BattleConsole";
 import { NavigationRose } from "../components/NavigationRose";
 import { useGameRoom } from "../hooks/useGameRoom";
-import { closeCurrentTab } from "../libs/browserTab";
+import { allowTabCloseWithoutPrompt, closeCurrentTab } from "../libs/browserTab";
 
 const GAME_TICK_MS = 40;
 const GAME_OVER_DELAY_MS = 3000;
@@ -61,6 +61,8 @@ export function BattlePage() {
       gameRoom.match.finishedAt &&
       now - gameRoom.match.finishedAt >= GAME_OVER_DELAY_MS,
   );
+
+  useEffect(() => allowTabCloseWithoutPrompt(), []);
 
   useEffect(() => {
     if (!gameRoom?.match || !ownsClock || !commanderId) {
