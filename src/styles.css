@@ -197,6 +197,31 @@ button {
   text-transform: uppercase;
 }
 
+.app-nav {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  margin-left: auto;
+}
+
+.app-nav a,
+.app-nav button {
+  background: transparent;
+  border: 0;
+  color: #86ffd1;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 0;
+  text-transform: uppercase;
+}
+
+.app-nav a:hover,
+.app-nav button:hover {
+  color: #effff9;
+}
+
 .commander-chip,
 .room-chip {
   align-items: center;
@@ -257,6 +282,12 @@ button {
   box-shadow:
     inset 0 0 22px rgba(36, 247, 167, 0.05),
     0 0 28px rgba(36, 247, 167, 0.08);
+}
+
+.placeholder-panel {
+  margin: 22px auto 0;
+  max-width: 1180px;
+  min-height: 240px;
 }
 
 .sign-in-panel {
@@ -619,6 +650,78 @@ button {
   max-width: 1180px;
   overflow: hidden;
   padding: 20px;
+}
+
+.leaderboard-panel {
+  margin: 0 auto;
+  max-width: 1180px;
+  overflow: hidden;
+  padding: 20px;
+}
+
+.leaderboard-panel__copy {
+  color: #64dcb5;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  margin: 6px 0 0;
+  text-transform: uppercase;
+}
+
+.leaderboard-table {
+  min-width: 660px;
+}
+
+.leaderboard-commander {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+}
+
+.leaderboard-commander .tank-avatar {
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin-top: 0;
+}
+
+.leaderboard-commander .tank-avatar__turret {
+  color: #02100c;
+  display: flex;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.42rem;
+  margin-top: 0;
+}
+
+.leaderboard-commander .tank-avatar__barrel,
+.leaderboard-commander .tank-avatar__light {
+  margin-top: 0;
+}
+
+.leaderboard-rank,
+.leaderboard-value {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.leaderboard-rank--1 {
+  color: #ffe45c;
+}
+
+.leaderboard-rank--2 {
+  color: #d1e5e1;
+}
+
+.leaderboard-rank--3 {
+  color: #e7a86d;
+}
+
+.leaderboard-value--win {
+  color: #24f7a7;
+  font-weight: 900;
+}
+
+.leaderboard-value--loss {
+  color: #ff8790;
 }
 
 .panel-heading {
@@ -1452,6 +1555,10 @@ button {
   .panel-heading {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .app-nav {
+    margin-left: 0;
   }
 
   .page-heading h1,

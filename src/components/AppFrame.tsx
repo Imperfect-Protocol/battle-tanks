@@ -18,6 +18,11 @@ export function AppFrame({ children, eyebrow, title }: AppFrameProps) {
           <span>BATTLE TANKS</span>
           <strong>Imperfect Protocol</strong>
         </Link>
+        <nav className="app-nav" aria-label="Main navigation">
+          <Link to="/lobbies">Lobbies</Link>
+          <Link to="/leaderboard">Leaderboard</Link>
+          <Link to="/settings">Settings</Link>
+        </nav>
         <div className="commander-chip">
           <Link to="/sign-in">{displayName}</Link>
           <button type="button" onClick={signOutCommander}>
