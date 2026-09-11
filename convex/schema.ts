@@ -125,10 +125,16 @@ export default defineSchema({
     matchId: v.id("matches"),
     playerId: v.id("players"),
     commanderId: v.optional(v.id("commanderProfiles")),
+    clientCommandId: v.optional(v.string()),
+    queueType: v.optional(v.union(v.literal("move"), v.literal("bearing"), v.literal("cannon"))),
     commands: v.array(v.string()),
+    status: v.optional(v.union(v.literal("queued"), v.literal("complete"))),
+    completedAt: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index("by_match_and_created_at", ["matchId", "createdAt"])
+    .index("by_match_status_and_created_at", ["matchId", "status", "createdAt"])
+    .index("by_player_and_client_command_id", ["playerId", "clientCommandId"])
     .index("by_player_and_created_at", ["playerId", "createdAt"]),
 
   projectiles: defineTable({

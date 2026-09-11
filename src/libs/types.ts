@@ -101,6 +101,10 @@ export type PlayerCommandRecord = {
   matchId: string;
   playerId: string;
   commanderId?: string;
+  clientCommandId?: string;
+  queueType?: "move" | "bearing" | "cannon";
   commands: string[];
+  status?: "queued" | "complete";
+  completedAt?: number;
   createdAt: number;
 };

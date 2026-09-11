@@ -25,14 +25,38 @@ const DEFAULT_FIRE_POWER = 100;
 
 type QueueType = "move" | "bearing" | "cannon";
 
+type QueuedCommand = {
+  id: string;
+  playerId: string;
+  command: string;
+  local: boolean;
+  dispatched: boolean;
+};
+
 type SimTank = TankRecord & {
-  queues: Record<QueueType, string[]>;
+  queues: Record<QueueType, QueuedCommand[]>;
+  activeMoveCommandId?: string;
   damagedByProjectiles: Set<string>;
+  serverUpdatedAt: number;
 };
 
 type SimProjectile = ProjectileRecord & {
   createdAt: number;
   damagedTankIds: Set<string>;
+};
+
+export type BattleCheckpoint = {
+  completedClientCommandIds: string[];
+  nextCommands: Array<{
+    clientCommandId: string;
+    queueType: QueueType;
+    command: string;
+  }>;
+  tanks: TankRecord[];
+  finished?: {
+    winnerPlayerId?: string;
+    finishedAt: number;
+  };
 };
 
 export class BattleSimulation {
@@ -47,12 +71,15 @@ export class BattleSimulation {
   private projectileSequence = 0;
   private finishedAt: number | undefined;
   private winnerPlayerId: string | undefined;
+  private localPlayerId: string | null = null;
+  private pendingCheckpoints: BattleCheckpoint[] = [];
 
-  sync(room: GameRoom | null, now: number) {
+  sync(room: GameRoom | null, now: number, localPlayerId: string | null = null) {
     if (!room?.match || !room.board) {
       return null;
     }
 
+    this.localPlayerId = localPlayerId;
     const nextKey = `${room.match.roomCode}:${room.players.map((player) => player.id).join(":")}`;
     if (nextKey !== this.key) {
       this.reset(room, nextKey, now);
@@ -61,15 +88,54 @@ export class BattleSimulation {
       this.board = room.board.record;
       this.players = room.players.map((player) => player.record);
       for (const tank of room.tanks) {
-        if (!this.tanks.has(tank.id)) {
+        const existing = this.tanks.get(tank.id);
+        if (!existing) {
           this.tanks.set(tank.id, createSimTank(tank.record));
+        } else if (tank.playerId !== localPlayerId && tank.record.updatedAt > existing.serverUpdatedAt) {
+          applyServerTankCheckpoint(existing, tank.record);
         }
       }
+    }
+
+    if (room.match.status === "finished") {
+      this.finishedAt = room.match.finishedAt ?? this.finishedAt ?? now;
+      this.winnerPlayerId = room.match.winnerPlayerId ?? this.winnerPlayerId;
     }
 
     this.applyCommandBatches(room.commandBatches);
     this.advance(now);
     return this.snapshot(room);
+  }
+
+  consumeCheckpoints() {
+    const checkpoints = this.pendingCheckpoints;
+    this.pendingCheckpoints = [];
+    return checkpoints;
+  }
+
+  queueLocalCommands(playerId: string | null, commands: string[]) {
+    if (!playerId) {
+      return;
+    }
+
+    const tank = this.tankForPlayer(playerId);
+    if (!tank || tank.health <= 0) {
+      return;
+    }
+
+    for (const command of commands) {
+      const parsed = parseCommand(command);
+      if (!parsed) {
+        continue;
+      }
+      tank.queues[queueTypeForCommand(parsed.action)].push({
+        id: createClientCommandId(),
+        playerId,
+        command,
+        local: true,
+        dispatched: false,
+      });
+    }
   }
 
   private reset(room: GameRoom, key: string, now: number) {
@@ -82,13 +148,20 @@ export class BattleSimulation {
     this.appliedCommandBatches = new Set();
     this.lastFrameAt = now;
     this.projectileSequence = 0;
-    this.finishedAt = undefined;
-    this.winnerPlayerId = undefined;
+    this.finishedAt = room.match?.finishedAt;
+    this.winnerPlayerId = room.match?.winnerPlayerId;
+    this.pendingCheckpoints = [];
   }
 
   private applyCommandBatches(commandBatches: PlayerCommandRecord[]) {
     const batches = [...commandBatches].sort((left, right) => left.createdAt - right.createdAt || left._id.localeCompare(right._id));
     for (const batch of batches) {
+      if (batch.status === "complete") {
+        this.removeCommandFromQueues(batch._id);
+        this.appliedCommandBatches.add(batch._id);
+        continue;
+      }
+
       if (this.appliedCommandBatches.has(batch._id)) {
         continue;
       }
@@ -99,33 +172,39 @@ export class BattleSimulation {
         continue;
       }
 
-      this.queueCommands(tank, batch.commands);
+      this.queueCommandBatch(tank, batch);
     }
   }
 
-  private queueCommands(tank: SimTank, commands: string[]) {
-    const next: Record<QueueType, string[]> = {
+  private queueCommandBatch(tank: SimTank, batch: PlayerCommandRecord) {
+    const next: Record<QueueType, QueuedCommand[]> = {
       move: [],
       bearing: [],
       cannon: [],
     };
 
-    for (const command of commands) {
+    for (const command of batch.commands) {
       const parsed = parseCommand(command);
       if (!parsed) {
         continue;
       }
-      next[queueTypeForCommand(parsed.action)].push(command);
+      next[queueTypeForCommand(parsed.action)].push({
+        id: batch.clientCommandId ?? batch._id,
+        playerId: batch.playerId,
+        command,
+        local: false,
+        dispatched: true,
+      });
     }
 
     if (next.move.length > 0) {
       tank.queues.move.push(...next.move);
     }
     if (next.bearing.length > 0) {
-      tank.queues.bearing = next.bearing;
+      tank.queues.bearing.push(...next.bearing);
     }
     if (next.cannon.length > 0) {
-      tank.queues.cannon = next.cannon;
+      tank.queues.cannon.push(...next.cannon);
     }
   }
 
@@ -162,7 +241,8 @@ export class BattleSimulation {
 
     const bearingCommand = tank.queues.bearing[0];
     if (bearingCommand) {
-      const parsed = parseCommand(bearingCommand);
+      this.recordDispatch(tank, "bearing", bearingCommand, now);
+      const parsed = parseCommand(bearingCommand.command);
       if (parsed?.action === "bear") {
         const previousBearing = angleFromDirection(tank.hullDirection);
         const result = stepTowardBearing(previousBearing, parsed.value, ticks);
@@ -173,6 +253,7 @@ export class BattleSimulation {
         tank.updatedAt = now;
         if (result.complete) {
           tank.queues.bearing.shift();
+          this.recordCommandComplete(tank, bearingCommand, "bearing", now);
         }
       } else {
         tank.queues.bearing.shift();
@@ -181,25 +262,29 @@ export class BattleSimulation {
 
     const cannonCommand = tank.queues.cannon[0];
     if (cannonCommand) {
+      this.recordDispatch(tank, "cannon", cannonCommand, now);
       const complete = this.applyCannonCommand(tank, cannonCommand, ticks, now);
       if (complete) {
         tank.queues.cannon.shift();
+        this.recordCommandComplete(tank, cannonCommand, "cannon", now);
       }
     }
 
     if (Math.abs(tank.moveRemaining ?? 0) <= 0.5 && tank.queues.move.length > 0) {
       const command = tank.queues.move.shift();
-      const parsed = command ? parseCommand(command) : null;
-      if (parsed?.action === "move") {
+      const parsed = command ? parseCommand(command.command) : null;
+      if (parsed?.action === "move" && command) {
+        this.recordDispatch(tank, "move", command, now);
         tank.moveRemaining = (tank.moveRemaining ?? 0) + parsed.value * UNITS_PER_SQUARE;
-        tank.activeMoveCommand = command;
+        tank.activeMoveCommand = command.command;
+        tank.activeMoveCommandId = command.id;
         tank.updatedAt = now;
       }
     }
   }
 
-  private applyCannonCommand(tank: SimTank, command: string, ticks: number, now: number) {
-    const parsed = parseCommand(command);
+  private applyCannonCommand(tank: SimTank, command: QueuedCommand, ticks: number, now: number) {
+    const parsed = parseCommand(command.command);
     if (!parsed) {
       return true;
     }
@@ -253,7 +338,11 @@ export class BattleSimulation {
       tank.velocity = { x: 0, y: 0 };
       tank.speed = 0;
       tank.moveRemaining = 0;
+      if (tank.activeMoveCommandId) {
+        this.recordMoveComplete(tank, now);
+      }
       tank.activeMoveCommand = "";
+      tank.activeMoveCommandId = undefined;
       return;
     }
 
@@ -278,7 +367,9 @@ export class BattleSimulation {
       tank.moveRemaining = 0;
       tank.velocity = { x: 0, y: 0 };
       tank.speed = 0;
+      this.recordMoveComplete(tank, now);
       tank.activeMoveCommand = "";
+      tank.activeMoveCommandId = undefined;
     }
   }
 
@@ -288,12 +379,16 @@ export class BattleSimulation {
       const clamped = clampTankPosition(tank.position, boardSize);
       const wallImpact = Math.hypot(tank.position.x - clamped.x, tank.position.y - clamped.y);
       if (wallImpact > 0.1) {
+        const completedCommandIds = tank.activeMoveCommandId ? [tank.activeMoveCommandId] : [];
         this.damageTank(tank, collisionDamage(vectorLength(tank.velocity)), now);
         tank.position = clamped;
         tank.velocity = { x: 0, y: 0 };
         tank.speed = 0;
         tank.moveRemaining = 0;
+        tank.activeMoveCommand = "";
+        tank.activeMoveCommandId = undefined;
         tank.queues.move = [];
+        this.recordTankCheckpoint(tank, now, completedCommandIds);
       }
     }
 
@@ -312,6 +407,8 @@ export class BattleSimulation {
           continue;
         }
 
+        const leftCompletedCommandIds = left.activeMoveCommandId ? [left.activeMoveCommandId] : [];
+        const rightCompletedCommandIds = right.activeMoveCommandId ? [right.activeMoveCommandId] : [];
         const overlap = minimumDistance - distance;
         const normal = { x: delta.x / distance, y: delta.y / distance };
         left.position = clampTankPosition({ x: left.position.x - normal.x * overlap * 0.5, y: left.position.y - normal.y * overlap * 0.5 }, boardSize);
@@ -329,8 +426,14 @@ export class BattleSimulation {
         right.speed = 0;
         left.moveRemaining = 0;
         right.moveRemaining = 0;
+        left.activeMoveCommand = "";
+        right.activeMoveCommand = "";
+        left.activeMoveCommandId = undefined;
+        right.activeMoveCommandId = undefined;
         left.queues.move = [];
         right.queues.move = [];
+        this.recordTankCheckpoint(left, now, leftCompletedCommandIds);
+        this.recordTankCheckpoint(right, now, rightCompletedCommandIds);
       }
     }
   }
@@ -430,6 +533,7 @@ export class BattleSimulation {
   }
 
   private applyExplosion(projectile: SimProjectile, now: number) {
+    const changedTanks = [];
     for (const tank of this.tanks.values()) {
       if (tank.health <= 0 || tank._id === projectile.ownerTankId || projectile.damagedTankIds.has(tank._id)) {
         continue;
@@ -442,6 +546,16 @@ export class BattleSimulation {
 
       projectile.damagedTankIds.add(tank._id);
       this.damageTank(tank, damageForImpact(distance, projectile.damage), now);
+      changedTanks.push(tank);
+    }
+
+    if (projectile.ownerPlayerId === this.localPlayerId) {
+      const ownerTank = this.tanks.get(projectile.ownerTankId);
+      this.pendingCheckpoints.push({
+        completedClientCommandIds: [],
+        nextCommands: [],
+        tanks: [ownerTank, ...changedTanks].filter((tank): tank is SimTank => Boolean(tank)).map(snapshotTank),
+      });
     }
   }
 
@@ -456,6 +570,8 @@ export class BattleSimulation {
       tank.velocity = { x: 0, y: 0 };
       tank.speed = 0;
       tank.moveRemaining = 0;
+      tank.activeMoveCommand = "";
+      tank.activeMoveCommandId = undefined;
       tank.queues.move = [];
       tank.queues.bearing = [];
       tank.queues.cannon = [];
@@ -474,6 +590,103 @@ export class BattleSimulation {
 
     this.finishedAt = now;
     this.winnerPlayerId = alive[0]?.playerId;
+    this.pendingCheckpoints.push({
+      completedClientCommandIds: [],
+      nextCommands: [],
+      tanks: [...this.tanks.values()].map(snapshotTank),
+      finished: {
+        winnerPlayerId: this.winnerPlayerId,
+        finishedAt: now,
+      },
+    });
+  }
+
+  private recordCommandComplete(tank: SimTank, command: QueuedCommand, queueType: QueueType, now: number) {
+    if (command.playerId !== this.localPlayerId) {
+      return;
+    }
+
+    tank.updatedAt = now;
+    this.pendingCheckpoints.push({
+      completedClientCommandIds: [command.id],
+      nextCommands: this.dispatchNextCommand(tank, queueType, now),
+      tanks: [snapshotTank(tank)],
+    });
+  }
+
+  private recordMoveComplete(tank: SimTank, now: number) {
+    const commandId = tank.activeMoveCommandId;
+    if (!commandId || tank.playerId !== this.localPlayerId) {
+      return;
+    }
+
+    tank.updatedAt = now;
+    this.pendingCheckpoints.push({
+      completedClientCommandIds: [commandId],
+      nextCommands: this.dispatchNextCommand(tank, "move", now),
+      tanks: [snapshotTank(tank)],
+    });
+  }
+
+  private recordTankCheckpoint(tank: SimTank, now: number, completedCommandIds: string[] = []) {
+    if (tank.playerId !== this.localPlayerId && completedCommandIds.length === 0) {
+      return;
+    }
+
+    tank.updatedAt = now;
+    this.pendingCheckpoints.push({
+      completedClientCommandIds: completedCommandIds,
+      nextCommands: [],
+      tanks: [snapshotTank(tank)],
+    });
+  }
+
+  private recordDispatch(tank: SimTank, queueType: QueueType, command: QueuedCommand, now: number) {
+    if (!command.local || command.dispatched || command.playerId !== this.localPlayerId) {
+      return;
+    }
+
+    command.dispatched = true;
+    tank.updatedAt = now;
+    this.pendingCheckpoints.push({
+      completedClientCommandIds: [],
+      nextCommands: [{
+        clientCommandId: command.id,
+        queueType,
+        command: command.command,
+      }],
+      tanks: [snapshotTank(tank)],
+    });
+  }
+
+  private dispatchNextCommand(tank: SimTank, queueType: QueueType, now: number) {
+    const nextCommand = tank.queues[queueType][0];
+    if (!nextCommand || !nextCommand.local || nextCommand.dispatched || nextCommand.playerId !== this.localPlayerId) {
+      return [];
+    }
+
+    nextCommand.dispatched = true;
+    tank.updatedAt = now;
+    return [{
+      clientCommandId: nextCommand.id,
+      queueType,
+      command: nextCommand.command,
+    }];
+  }
+
+  private removeCommandFromQueues(commandId: string) {
+    for (const tank of this.tanks.values()) {
+      for (const queueType of ["move", "bearing", "cannon"] as QueueType[]) {
+        tank.queues[queueType] = tank.queues[queueType].filter((command) => command.id !== commandId);
+      }
+      if (tank.activeMoveCommandId === commandId) {
+        tank.activeMoveCommandId = undefined;
+        tank.activeMoveCommand = "";
+        tank.moveRemaining = 0;
+        tank.velocity = { x: 0, y: 0 };
+        tank.speed = 0;
+      }
+    }
   }
 
   private snapshot(room: GameRoom) {
@@ -519,13 +732,28 @@ function createSimTank(record: TankRecord): SimTank {
       cannon: [],
     },
     damagedByProjectiles: new Set(),
+    serverUpdatedAt: record.updatedAt,
   };
 }
 
+function applyServerTankCheckpoint(tank: SimTank, record: TankRecord) {
+  const queues = tank.queues;
+  const activeMoveCommandId = tank.activeMoveCommandId;
+  const damagedByProjectiles = tank.damagedByProjectiles;
+  Object.assign(tank, clone(record), {
+    queues,
+    activeMoveCommandId,
+    damagedByProjectiles,
+    serverUpdatedAt: record.updatedAt,
+  });
+}
+
 function snapshotTank(tank: SimTank): TankRecord {
-  const { queues, damagedByProjectiles, ...record } = tank;
+  const { queues, activeMoveCommandId, damagedByProjectiles, serverUpdatedAt, ...record } = tank;
   void queues;
+  void activeMoveCommandId;
   void damagedByProjectiles;
+  void serverUpdatedAt;
   return clone(record);
 }
 
@@ -701,4 +929,10 @@ function interpolate(value: number, from: number, fromValue: number, to: number,
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function createClientCommandId() {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }

@@ -89,6 +89,36 @@ const observedEvent = v.object({
   expiresAt: v.number(),
 });
 
+const vectorInput = v.object({
+  x: v.number(),
+  y: v.number(),
+});
+
+const tankCheckpoint = v.object({
+  tankId: v.id("tanks"),
+  position: vectorInput,
+  velocity: vectorInput,
+  speed: v.optional(v.number()),
+  moveRemaining: v.optional(v.number()),
+  activeMoveCommand: v.optional(v.string()),
+  hullDirection: v.number(),
+  turretDirection: v.number(),
+  turretLocked: v.optional(v.boolean()),
+  launchAngle: v.optional(v.number()),
+  cannonPower: v.optional(v.number()),
+  lastFirePower: v.optional(v.number()),
+  health: v.number(),
+  updatedAt: v.number(),
+});
+
+const queueTypeInput = v.union(v.literal("move"), v.literal("bearing"), v.literal("cannon"));
+
+const nextCommandInput = v.object({
+  clientCommandId: v.string(),
+  queueType: queueTypeInput,
+  command: v.string(),
+});
+
 export const getRoom = query({
   args: { roomCode: v.string() },
   returns: v.union(v.null(), v.any()),
@@ -111,22 +141,22 @@ export const getRoom = query({
       .query("tanks")
       .withIndex("by_match", (q) => q.eq("matchId", match._id))
       .take(2);
-    const commandBatches = await ctx.db
+    const commandBatches = (await ctx.db
       .query("playerCommands")
       .withIndex("by_match_and_created_at", (q) => q.eq("matchId", match._id))
-      .order("asc")
-      .take(250);
+      .order("desc")
+      .take(250)).reverse();
     const matchEnd = resolveMatchEnd(players, tanks);
-    const finishedAt = matchEnd.finished
+    const finishedAt = match.finishedAt ?? (matchEnd.finished
       ? tanks
         .filter((tank) => tank.health <= 0)
         .map((tank) => tank.updatedAt)
         .sort((a, b) => a - b)[0]
-      : undefined;
+      : undefined);
     const viewMatch = {
       ...match,
-      status: matchEnd.finished ? "finished" : players.length >= 2 ? "active" : match.status,
-      ...(matchEnd.winnerPlayerId ? { winnerPlayerId: matchEnd.winnerPlayerId } : {}),
+      status: match.status === "finished" || matchEnd.finished ? "finished" : players.length >= 2 ? "active" : match.status,
+      ...(match.winnerPlayerId ?? matchEnd.winnerPlayerId ? { winnerPlayerId: match.winnerPlayerId ?? matchEnd.winnerPlayerId } : {}),
       ...(finishedAt ? { finishedAt } : {}),
     };
 
@@ -429,13 +459,144 @@ export const sendCommands = mutation({
       return null;
     }
 
-    await ctx.db.insert("playerCommands", {
-      matchId: match._id,
-      playerId: player._id,
-      commanderId: commander.commanderId,
-      commands,
-      createdAt: now,
-    });
+    for (const [index, command] of commands.entries()) {
+      const parsed = parseStoredCommand(command);
+      if (!parsed) {
+        throw new Error("Incorrect command");
+      }
+
+      await ctx.db.insert("playerCommands", {
+        matchId: match._id,
+        playerId: player._id,
+        commanderId: commander.commanderId,
+        queueType: commandQueueType(parsed),
+        commands: [command],
+        status: "queued",
+        createdAt: now + index,
+      });
+    }
+
+    return null;
+  },
+});
+
+export const checkpointBattleState = mutation({
+  args: {
+    roomCode: v.string(),
+    commanderId: v.id("commanderProfiles"),
+    completedCommandIds: v.array(v.id("playerCommands")),
+    completedClientCommandIds: v.optional(v.array(v.string())),
+    nextCommands: v.optional(v.array(nextCommandInput)),
+    tanks: v.array(tankCheckpoint),
+    finished: v.optional(v.object({
+      winnerPlayerId: v.optional(v.id("players")),
+      finishedAt: v.number(),
+    })),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const roomCode = normalizeRoom(args.roomCode);
+    const match = await ctx.db
+      .query("matches")
+      .withIndex("by_room_code", (q) => q.eq("roomCode", roomCode))
+      .unique();
+
+    if (!match) {
+      return null;
+    }
+
+    const commander = await requireCommanderProfile(ctx, args.commanderId);
+    const player = await findCommanderPlayer(ctx, match._id, commander.commanderId);
+    if (!player) {
+      throw new Error("Join the room before saving battle state");
+    }
+
+    for (const commandId of args.completedCommandIds.slice(0, 6)) {
+      const command = await ctx.db.get(commandId);
+      if (!command || command.matchId !== match._id || command.playerId !== player._id || command.status === "complete") {
+        continue;
+      }
+
+      await ctx.db.patch(commandId, {
+        status: "complete",
+        completedAt: now,
+      });
+    }
+
+    for (const clientCommandId of (args.completedClientCommandIds ?? []).slice(0, 6)) {
+      const command = await ctx.db
+        .query("playerCommands")
+        .withIndex("by_player_and_client_command_id", (q) => q.eq("playerId", player._id).eq("clientCommandId", cleanClientCommandId(clientCommandId)))
+        .unique();
+      if (!command || command.matchId !== match._id || command.status === "complete") {
+        continue;
+      }
+
+      await ctx.db.patch(command._id, {
+        status: "complete",
+        completedAt: now,
+      });
+    }
+
+    for (const nextCommand of (args.nextCommands ?? []).slice(0, 3)) {
+      const command = cleanSingleCommand(nextCommand.command);
+      const parsed = command ? parseStoredCommand(command) : null;
+      if (!command || !parsed || commandQueueType(parsed) !== nextCommand.queueType) {
+        throw new Error("Incorrect command");
+      }
+
+      const clientCommandId = cleanClientCommandId(nextCommand.clientCommandId);
+      const existing = await ctx.db
+        .query("playerCommands")
+        .withIndex("by_player_and_client_command_id", (q) => q.eq("playerId", player._id).eq("clientCommandId", clientCommandId))
+        .unique();
+      if (existing) {
+        continue;
+      }
+
+      await ctx.db.insert("playerCommands", {
+        matchId: match._id,
+        playerId: player._id,
+        commanderId: commander.commanderId,
+        clientCommandId,
+        queueType: nextCommand.queueType,
+        commands: [command],
+        status: "queued",
+        createdAt: now,
+      });
+    }
+
+    for (const tankState of args.tanks.slice(0, 2)) {
+      const tank = await ctx.db.get(tankState.tankId);
+      if (!tank || tank.matchId !== match._id) {
+        continue;
+      }
+
+      await ctx.db.patch(tankState.tankId, cleanTankCheckpoint(tankState, now));
+      if (tankState.health <= 0) {
+        const tankPlayer = await ctx.db.get(tank.playerId);
+        if (tankPlayer && !tankPlayer.finishedAt) {
+          await ctx.db.patch(tank.playerId, { finishedAt: now });
+        }
+      }
+    }
+
+    if (match.status !== "finished") {
+      const tanks = await ctx.db
+        .query("tanks")
+        .withIndex("by_match", (q) => q.eq("matchId", match._id))
+        .take(2);
+      const matchEnd = resolveMatchEnd(await playersForMatch(ctx, match._id), tanks);
+      if (args.finished || matchEnd.finished) {
+        await ctx.db.patch(match._id, {
+          status: "finished",
+          winnerPlayerId: args.finished?.winnerPlayerId ?? matchEnd.winnerPlayerId,
+          finishedAt: args.finished?.finishedAt ?? now,
+          updatedAt: now,
+        });
+      }
+    }
 
     return null;
   },
@@ -643,6 +804,13 @@ async function findCommanderPlayer(ctx: any, matchId: any, commanderId: any) {
     .query("players")
     .withIndex("by_match_and_commander", (q: any) => q.eq("matchId", matchId).eq("commanderId", commanderId))
     .unique();
+}
+
+async function playersForMatch(ctx: any, matchId: any) {
+  return await ctx.db
+    .query("players")
+    .withIndex("by_match", (q: any) => q.eq("matchId", matchId))
+    .take(2);
 }
 
 async function findPlayerTank(ctx: any, matchId: any, playerId: any) {
@@ -1301,6 +1469,72 @@ function vectorFromBearing(degrees: number, magnitude: number) {
 
 function moveCommandUnitsToDistance(units: number) {
   return (units / MOVE_COMMAND_UNITS_PER_SQUARE) * UNITS_PER_SQUARE;
+}
+
+function commandQueueType(command: StoredCommand) {
+  if (command.action === "move") {
+    return "move";
+  }
+  if (command.action === "bear") {
+    return "bearing";
+  }
+  return "cannon";
+}
+
+function cleanSingleCommand(command: string) {
+  const commands = normalizeOrderCommand(command);
+  return commands.length === 1 ? commands[0] : null;
+}
+
+function cleanClientCommandId(clientCommandId: string) {
+  return clientCommandId.trim().slice(0, 80);
+}
+
+function cleanTankCheckpoint(tank: {
+  position: { x: number; y: number };
+  velocity: { x: number; y: number };
+  speed?: number;
+  moveRemaining?: number;
+  activeMoveCommand?: string;
+  hullDirection: number;
+  turretDirection: number;
+  turretLocked?: boolean;
+  launchAngle?: number;
+  cannonPower?: number;
+  lastFirePower?: number;
+  health: number;
+  updatedAt: number;
+}, now: number) {
+  return {
+    position: cleanVector(tank.position),
+    velocity: cleanVector(tank.velocity),
+    speed: cleanOptionalNumber(tank.speed, 0),
+    moveRemaining: cleanOptionalNumber(tank.moveRemaining, 0),
+    activeMoveCommand: tank.activeMoveCommand?.slice(0, 64) ?? "",
+    hullDirection: normalizeDegrees(cleanNumber(tank.hullDirection, 0)),
+    turretDirection: normalizeDegrees(cleanNumber(tank.turretDirection, 0)),
+    turretLocked: Boolean(tank.turretLocked),
+    launchAngle: clampFinite(tank.launchAngle, MIN_AIM_ELEVATION_DEGREES, MAX_AIM_ELEVATION_DEGREES, DEFAULT_FIRE_ANGLE_DEGREES),
+    cannonPower: clampFinite(tank.cannonPower, MIN_FIRE_POWER, MAX_FIRE_POWER, DEFAULT_FIRE_POWER),
+    lastFirePower: clampFinite(tank.lastFirePower, MIN_FIRE_POWER, MAX_FIRE_POWER, DEFAULT_FIRE_POWER),
+    health: clampFinite(tank.health, 0, MAX_HEALTH, MAX_HEALTH),
+    updatedAt: Math.max(cleanNumber(tank.updatedAt, now), now),
+  };
+}
+
+function cleanVector(vector: { x: number; y: number }) {
+  return {
+    x: cleanNumber(vector.x, 0),
+    y: cleanNumber(vector.y, 0),
+  };
+}
+
+function cleanOptionalNumber(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function cleanNumber(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 async function patchHullBearing(ctx: any, tank: any, hullDirection: number, now: number) {

@@ -7,6 +7,7 @@ import { NavigationRose } from "../components/NavigationRose";
 import { useBattleSimulation } from "../hooks/useBattleSimulation";
 import { useGameRoom } from "../hooks/useGameRoom";
 import { allowTabCloseWithoutPrompt, closeCurrentTab } from "../libs/browserTab";
+import { Orders } from "../libs/Orders";
 
 const GAME_OVER_DELAY_MS = 3000;
 const STANDBY_AFTER_MS = 2 * 60 * 1000;
@@ -23,8 +24,8 @@ export function BattlePage() {
   const [battleName, setBattleName] = useState("");
   const [battleNameError, setBattleNameError] = useState("");
   const joinAttemptedRef = useRef(false);
-  const { gameRoom: serverRoom, createRoom, joinRoom, submitScript } = useGameRoom(cleanRoomCode, commanderId ?? undefined);
-  const gameRoom = useBattleSimulation(serverRoom);
+  const { gameRoom: serverRoom, createRoom, joinRoom } = useGameRoom(cleanRoomCode);
+  const { gameRoom, queueCommands } = useBattleSimulation(serverRoom, cleanRoomCode, commanderId);
   const tankByPlayer = useMemo(() => new Map(gameRoom?.tanks.map((tank) => [tank.playerId, tank]) ?? []), [gameRoom]);
   const localPlayer = gameRoom?.players.find((player) => player.commanderId === commanderId);
   const localTank = localPlayer ? tankByPlayer.get(localPlayer.id) : null;
@@ -123,7 +124,12 @@ export function BattlePage() {
       throw new Error("Choose a commander before submitting orders");
     }
 
-    await submitScript(commanderId, command);
+    const orders = Orders.parse(command);
+    if (orders.isEmpty || orders.hasInvalidCommands) {
+      throw new Error("Incorrect command");
+    }
+
+    queueCommands(orders.commands);
     return describeCommand(command);
   };
 
