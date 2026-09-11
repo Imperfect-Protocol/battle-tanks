@@ -26,7 +26,7 @@ export function useGameRoom(roomCode: string) {
     return (runPlayerTick as (args: unknown) => Promise<null>)({
       roomCode,
       commanderId,
-      commands: orders.commands,
+      commands: splitCommands(script),
       observedEvents,
     });
   }, [roomCode, runPlayerTick]);
@@ -48,4 +48,11 @@ export function useGameRoom(roomCode: string) {
     tickPlayer,
     submitScript,
   };
+}
+
+function splitCommands(script: string) {
+  return script
+    .split(/[\n,;]+/)
+    .map((command) => command.trim())
+    .filter(Boolean);
 }

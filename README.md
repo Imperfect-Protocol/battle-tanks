@@ -66,4 +66,3 @@ See the [GitHub Codespaces Guide](docs/GITHUB_CODESPACES.md) for detailed setup 
 ## Commit Signatures
 
 This repository requires all commits to have verified signatures. See the [GitHub Commit Signatures Guide](docs/GITHUB_COMMIT_SIGNATURES.md) for step-by-step instructions on setting up SSH-based commit signing.
-

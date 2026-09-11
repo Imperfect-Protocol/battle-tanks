@@ -7,6 +7,7 @@ import { MainLobbyPage } from "../pages/MainLobbyPage";
 import { PlaceholderPage } from "../pages/PlaceholderPage";
 import { SignInPage } from "../pages/SignInPage";
 import { SplashPage } from "../pages/SplashPage";
+import { StandByPage } from "../pages/StandByPage";
 
 export default function App() {
   return (
@@ -44,6 +45,14 @@ export default function App() {
           element={
             <RequireCommander>
               <PlaceholderPage eyebrow="Settings" title="Settings" />
+            </RequireCommander>
+          }
+        />
+        <Route
+          path="/battle/:roomCode/stand-by"
+          element={
+            <RequireCommander>
+              <StandByPage />
             </RequireCommander>
           }
         />
