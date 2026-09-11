@@ -121,6 +121,16 @@ export default defineSchema({
     .index("by_match", ["matchId"])
     .index("by_player", ["playerId"]),
 
+  playerCommands: defineTable({
+    matchId: v.id("matches"),
+    playerId: v.id("players"),
+    commanderId: v.optional(v.id("commanderProfiles")),
+    commands: v.array(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_match_and_created_at", ["matchId", "createdAt"])
+    .index("by_player_and_created_at", ["playerId", "createdAt"]),
+
   projectiles: defineTable({
     matchId: v.id("matches"),
     ownerPlayerId: v.optional(v.id("players")),

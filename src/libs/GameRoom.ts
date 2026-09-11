@@ -2,7 +2,7 @@ import { Board } from "./Board";
 import { Missile } from "./Missile";
 import { Player } from "./Player";
 import { Tank } from "./Tank";
-import type { BoardRecord, OrderRecord, PlayerRecord, ProjectileRecord, TankRecord, WorldEventRecord } from "./types";
+import type { BoardRecord, OrderRecord, PlayerCommandRecord, PlayerRecord, ProjectileRecord, TankRecord, WorldEventRecord } from "./types";
 
 export class GameRoom {
   readonly board: Board | null;
@@ -26,6 +26,8 @@ export class GameRoom {
     projectiles: ProjectileRecord[],
     readonly orders: OrderRecord[],
     events: WorldEventRecord[] = [],
+    readonly commandBatches: PlayerCommandRecord[] = [],
+    readonly ownPendingWork = false,
   ) {
     this.board = board ? new Board(board) : null;
     this.players = players.map((player) => new Player(player));

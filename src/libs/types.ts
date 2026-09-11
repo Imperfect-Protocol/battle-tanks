@@ -95,3 +95,12 @@ export type OrderRecord = {
   cursor: number;
   status: "queued" | "running" | "complete";
 };
+
+export type PlayerCommandRecord = {
+  _id: string;
+  matchId: string;
+  playerId: string;
+  commanderId?: string;
+  commands: string[];
+  createdAt: number;
+};

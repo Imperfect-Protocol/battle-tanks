@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "convex/react";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { GameRoom } from "../libs/GameRoom";
@@ -9,43 +9,41 @@ export function useGameRoom(roomCode: string) {
   const room = useQuery(api.game.getRoom, { roomCode });
   const createRoom = useMutation(api.game.createRoom);
   const joinRoom = useMutation(api.game.joinRoom);
-  const runPlayerTick = useMutation(api.game.runPlayerTick);
-  const tickPlayer = useCallback((commanderId: Id<"commanderProfiles">, observedEvents: unknown[] = []) =>
-    (runPlayerTick as (args: unknown) => Promise<null>)({
-      roomCode,
-      commanderId,
-      commands: [],
-      observedEvents,
-    }), [roomCode, runPlayerTick]);
-  const submitScript = useCallback((commanderId: Id<"commanderProfiles">, script: string, observedEvents: unknown[] = []) => {
+  const sendCommands = useMutation(api.game.sendCommands);
+  const submitScript = useCallback((commanderId: Id<"commanderProfiles">, script: string) => {
     const orders = Orders.parse(script);
     if (orders.isEmpty || orders.hasInvalidCommands) {
       throw new Error("Incorrect command");
     }
 
-    return (runPlayerTick as (args: unknown) => Promise<null>)({
+    return (sendCommands as (args: unknown) => Promise<null>)({
       roomCode,
       commanderId,
       commands: splitCommands(script),
-      observedEvents,
     });
-  }, [roomCode, runPlayerTick]);
+  }, [roomCode, sendCommands]);
+  const gameRoom = useMemo(
+    () =>
+      room
+        ? new GameRoom(
+            room.match,
+            room.board,
+            room.players,
+            room.tanks,
+            room.projectiles,
+            room.orders,
+            room.events,
+            room.commandBatches ?? [],
+            Boolean(room.ownPendingWork),
+          )
+        : null,
+    [room],
+  );
 
   return {
-    gameRoom: room
-      ? new GameRoom(
-          room.match,
-          room.board,
-          room.players,
-          room.tanks,
-          room.projectiles,
-          room.orders,
-          room.events,
-        )
-      : null,
+    gameRoom,
     createRoom,
     joinRoom,
-    tickPlayer,
     submitScript,
   };
 }

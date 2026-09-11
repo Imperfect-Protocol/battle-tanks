@@ -4,10 +4,10 @@ import { useCommander } from "../app/CommanderContext";
 import { BattleBoard } from "../components/BattleBoard";
 import { BattleConsole } from "../components/BattleConsole";
 import { NavigationRose } from "../components/NavigationRose";
+import { useBattleSimulation } from "../hooks/useBattleSimulation";
 import { useGameRoom } from "../hooks/useGameRoom";
-import { closeCurrentTab } from "../libs/browserTab";
+import { allowTabCloseWithoutPrompt, closeCurrentTab } from "../libs/browserTab";
 
-const GAME_TICK_MS = 40;
 const GAME_OVER_DELAY_MS = 3000;
 const STANDBY_AFTER_MS = 2 * 60 * 1000;
 const HELP_TEXT = "COMMANDS: bear/b <00-36>, move/m <-10..10> squares, aim/a <00-36>, elev/e <10-60>, pow/p <10-100>, fire/f, ret/r";
@@ -23,31 +23,11 @@ export function BattlePage() {
   const [battleName, setBattleName] = useState("");
   const [battleNameError, setBattleNameError] = useState("");
   const joinAttemptedRef = useRef(false);
-  const tickInFlightRef = useRef<Promise<unknown> | null>(null);
-  const { gameRoom, createRoom, joinRoom, submitScript, tickPlayer } = useGameRoom(cleanRoomCode);
+  const { gameRoom: serverRoom, createRoom, joinRoom, submitScript } = useGameRoom(cleanRoomCode, commanderId ?? undefined);
+  const gameRoom = useBattleSimulation(serverRoom);
   const tankByPlayer = useMemo(() => new Map(gameRoom?.tanks.map((tank) => [tank.playerId, tank]) ?? []), [gameRoom]);
   const localPlayer = gameRoom?.players.find((player) => player.commanderId === commanderId);
   const localTank = localPlayer ? tankByPlayer.get(localPlayer.id) : null;
-  const observedEvents = useMemo(
-    () =>
-      gameRoom?.events
-        .filter((event) => event.sourcePlayerId !== localPlayer?.id && event.expiresAt > Date.now())
-        .map((event) => ({
-          eventId: event._id,
-          sourcePlayerId: event.sourcePlayerId,
-          targetTankId: event.targetTankId,
-          type: event.type,
-          position: event.position,
-          normal: event.normal,
-          radius: event.radius,
-          damage: event.damage,
-          penetration: event.penetration,
-          expiresAt: event.expiresAt,
-        }))
-        .slice(0, 20) ?? [],
-    [gameRoom?.events, localPlayer?.id],
-  );
-  const ownsClock = Boolean(localPlayer);
   const roomExists = Boolean(gameRoom?.match);
   const hasJoinedRoom = Boolean(localPlayer);
   const isCreateRoute = isNewBattleRoute || searchParams.get("create") === "1";
@@ -61,27 +41,6 @@ export function BattlePage() {
       gameRoom.match.finishedAt &&
       now - gameRoom.match.finishedAt >= GAME_OVER_DELAY_MS,
   );
-
-  useEffect(() => {
-    if (!gameRoom?.match || !ownsClock || !commanderId) {
-      return;
-    }
-
-    const timer = window.setInterval(() => {
-      if (tickInFlightRef.current) {
-        return;
-      }
-      const tick = tickPlayer(commanderId, observedEvents);
-      tickInFlightRef.current = tick;
-      void tick.finally(() => {
-        if (tickInFlightRef.current === tick) {
-          tickInFlightRef.current = null;
-        }
-      });
-    }, GAME_TICK_MS);
-
-    return () => window.clearInterval(timer);
-  }, [commanderId, gameRoom?.match, observedEvents, ownsClock, tickPlayer]);
 
   useEffect(() => {
     if (!gameRoom?.match || showGameOver) {
@@ -164,8 +123,7 @@ export function BattlePage() {
       throw new Error("Choose a commander before submitting orders");
     }
 
-    await tickInFlightRef.current;
-    await submitScript(commanderId, command, observedEvents);
+    await submitScript(commanderId, command);
     return describeCommand(command);
   };
 
@@ -211,7 +169,7 @@ export function BattlePage() {
 
       <section className="battle-workbench">
         <div className="board-stage">
-          <BattleBoard gameRoom={gameRoom} localPlayerId={localPlayer?.id ?? null} />
+          <BattleBoard gameRoom={gameRoom} localPlayerId={localPlayer?.id ?? null} interpolate={false} />
           {isCreateRoute && !roomExists && (
             <div className="battle-dialog">
               <form className="protocol-panel battle-dialog__panel" onSubmit={createBattle}>

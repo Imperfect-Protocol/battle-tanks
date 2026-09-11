@@ -111,14 +111,11 @@ export const getRoom = query({
       .query("tanks")
       .withIndex("by_match", (q) => q.eq("matchId", match._id))
       .take(2);
-    const projectiles = await ctx.db
-      .query("projectiles")
-      .withIndex("by_match", (q) => q.eq("matchId", match._id))
-      .take(60);
-    const events = await ctx.db
-      .query("worldEvents")
-      .withIndex("by_match_and_expires_at", (q) => q.eq("matchId", match._id).gte("expiresAt", Date.now()))
-      .take(40);
+    const commandBatches = await ctx.db
+      .query("playerCommands")
+      .withIndex("by_match_and_created_at", (q) => q.eq("matchId", match._id))
+      .order("asc")
+      .take(250);
     const matchEnd = resolveMatchEnd(players, tanks);
     const finishedAt = matchEnd.finished
       ? tanks
@@ -133,7 +130,7 @@ export const getRoom = query({
       ...(finishedAt ? { finishedAt } : {}),
     };
 
-    return { match: viewMatch, board, players, tanks, orders: [], projectiles, events };
+    return { match: viewMatch, board, players, tanks, orders: [], projectiles: [], events: [], commandBatches, ownPendingWork: false };
   },
 });
 
@@ -390,6 +387,56 @@ export const submitOrders = mutation({
     }
 
     await queuePlayerCommands(ctx, match, player, tank, args.commands, now);
+    return null;
+  },
+});
+
+export const sendCommands = mutation({
+  args: {
+    roomCode: v.string(),
+    commanderId: v.id("commanderProfiles"),
+    commands: v.array(v.string()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const roomCode = normalizeRoom(args.roomCode);
+    const match = await ctx.db
+      .query("matches")
+      .withIndex("by_room_code", (q) => q.eq("roomCode", roomCode))
+      .unique();
+
+    if (!match || match.status === "finished") {
+      throw new Error("Battle not found");
+    }
+
+    const commander = await requireCommanderProfile(ctx, args.commanderId);
+    const player = await findCommanderPlayer(ctx, match._id, commander.commanderId);
+    if (!player) {
+      throw new Error("Join the room before submitting orders");
+    }
+
+    const commands = [];
+    for (const command of args.commands) {
+      const normalizedCommands = normalizeOrderCommand(command);
+      if (normalizedCommands.length === 0) {
+        throw new Error("Incorrect command");
+      }
+      commands.push(...normalizedCommands);
+    }
+
+    if (commands.length === 0) {
+      return null;
+    }
+
+    await ctx.db.insert("playerCommands", {
+      matchId: match._id,
+      playerId: player._id,
+      commanderId: commander.commanderId,
+      commands,
+      createdAt: now,
+    });
+
     return null;
   },
 });
