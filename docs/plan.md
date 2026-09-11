@@ -34,6 +34,12 @@
 
 Values out of range should print error
 
+Commands are stored in three independent queues:
+
+- move commands: additive movement queue
+- bearing commands: compressed to the latest hull bearing target
+- cannon commands: compressed to latest aim/elevation/power settings between fire commands
+
  
  ## Moving
 

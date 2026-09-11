@@ -91,6 +91,7 @@ export type OrderRecord = {
   _id: string;
   playerId: string;
   tankId: string;
+  queueType?: "move" | "bearing" | "cannon";
   commands: string[];
   cursor: number;
   status: "queued" | "running" | "complete";

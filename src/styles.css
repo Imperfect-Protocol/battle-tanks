@@ -1098,7 +1098,7 @@ button {
 }
 
 .projectile--exploding {
-  animation: explosion-bloom 360ms ease-out forwards;
+  animation: explosion-bloom 1000ms ease-out forwards;
   background: radial-gradient(circle, #fff6a8 0 18%, #ffb22e 38%, #ec5c20 66%, rgba(180, 63, 36, 0) 72%);
   box-shadow: 0 0 30px rgba(255, 178, 46, 0.84);
   height: calc(100% / var(--cells) * 0.95);
