@@ -1,27 +1,36 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
-
-const BOARD_SIZE = 12;
-const DEFAULT_LOBBY_ID = "pvp";
-const MAX_HEALTH = 100;
-const UNITS_PER_SQUARE = 1000;
-const TANK_LENGTH_UNITS = UNITS_PER_SQUARE * 1.18;
-const TANK_WIDTH_UNITS = UNITS_PER_SQUARE * 0.62;
-const TANK_COLLISION_RADIUS_UNITS = Math.hypot(TANK_LENGTH_UNITS / 2, TANK_WIDTH_UNITS / 2);
-const DEFAULT_FIRE_ANGLE_DEGREES = 45;
-const DEFAULT_FIRE_POWER = 100;
-const MOVE_COMMAND_UNITS_PER_SQUARE = 1;
-const MAX_MOVE_COMMAND_UNITS = 10;
-const MAX_MOVE_DISTANCE_UNITS = (MAX_MOVE_COMMAND_UNITS / MOVE_COMMAND_UNITS_PER_SQUARE) * UNITS_PER_SQUARE;
-const MIN_AIM_ELEVATION_DEGREES = 10;
-const MAX_AIM_ELEVATION_DEGREES = 60;
-const MIN_FIRE_POWER = 10;
-const MAX_FIRE_POWER = 100;
-const FRAME_RATE = 25;
-const TANK_COLORS = ["#24f7a7", "#40d8ff", "#ffe45c", "#ff6b9d", "#b5ff5c", "#ff9c45"];
-const TURRET_OFFSETS = [0.28, 0.333, 0.4, 0.48, 0.58];
-const CANNON_LENGTHS = [0.32, 0.38, 0.44, 0.5, 0.56];
-const TURRET_SIZES = [0.76, 0.84, 0.92, 1, 1.06];
+import {
+  BOARD_SIZE,
+  DEFAULT_FIRE_ANGLE_DEGREES,
+  DEFAULT_FIRE_POWER,
+  DEFAULT_LOBBY_ID,
+  MAX_HEALTH,
+  MAX_MOVE_DISTANCE_UNITS,
+  ORDER_QUEUE_TYPES,
+  UNITS_PER_SQUARE,
+  angleFromDirection,
+  cleanBattleName,
+  clampFinite,
+  clampInteger,
+  commandHelp,
+  compressCommandQueues,
+  completeActiveOrdersForQueue,
+  distanceToMoveCommandUnits,
+  emptyCommandQueues,
+  moveCommandUnitsToDistance,
+  normalizeLobbyId,
+  normalizeOrderCommand,
+  normalizeRoom,
+  normalizeTankSpec,
+  parseStoredCommand,
+  queueTypeForCommand,
+  sha256,
+  spawnPoint,
+  tankSpecFromSeed,
+  unitsPerTickToSquaresPerSecond,
+  vectorLength,
+} from "./gameCore";
 
 const vectorValidator = v.object({
   x: v.number(),
@@ -53,18 +62,6 @@ const gameSummaryValidator = v.object({
   players: v.array(v.string()),
   updatedAt: v.number(),
 });
-
-const commandHelp =
-  "Commands: bear/b <00-36>, move/m <-10..10> in squares, aim/a <00-36> to hold absolute turret aim, elev/e <10-60>, pow/p <10-100>, fire/f, ret/r to return turret to hull bearing.";
-
-type StoredCommand =
-  | { action: "bear"; bearing: number }
-  | { action: "move"; units: number }
-  | { action: "aim"; bearing: number }
-  | { action: "elev"; elevation: number }
-  | { action: "pow"; power: number }
-  | { action: "fire" }
-  | { action: "ret" };
 
 export const listLobbies = query({
   args: {},
@@ -260,18 +257,27 @@ export const issueCommands = mutation({
       throw new Error("Battle already finished");
     }
 
-    const commands: string[] = [];
+    const commandsByQueue = emptyCommandQueues();
     for (const command of args.commands) {
       const normalizedCommands = normalizeOrderCommand(command);
       if (normalizedCommands.length === 0) {
         throw new Error("Incorrect command");
       }
-      commands.push(...normalizedCommands);
+      for (const normalizedCommand of normalizedCommands) {
+        const parsed = parseStoredCommand(normalizedCommand);
+        if (!parsed) {
+          throw new Error("Incorrect command");
+        }
+        commandsByQueue[queueTypeForCommand(parsed)].push(normalizedCommand);
+      }
     }
 
+    const queuedCommands = compressCommandQueues(commandsByQueue);
+    const acceptedCommands = ORDER_QUEUE_TYPES.flatMap((queueType) => queuedCommands[queueType]);
+    const hadMoveCommands = queuedCommands.move.length > 0;
     const activeMoveRemaining = clampFinite(tank.moveRemaining, -MAX_MOVE_DISTANCE_UNITS * 4, MAX_MOVE_DISTANCE_UNITS * 4, 0);
-    if (Math.abs(activeMoveRemaining) > 0.5 && commands.every((command) => command.startsWith("move "))) {
-      const extraDistance = commands.reduce((total, command) => {
+    if (Math.abs(activeMoveRemaining) > 0.5 && hadMoveCommands) {
+      const extraDistance = queuedCommands.move.reduce((total, command) => {
         const parsed = parseStoredCommand(command);
         return parsed?.action === "move" ? total + moveCommandUnitsToDistance(parsed.units) : total;
       }, 0);
@@ -279,21 +285,46 @@ export const issueCommands = mutation({
         moveRemaining: activeMoveRemaining + extraDistance,
         updatedAt: now,
       });
-      return { accepted: commands };
+      queuedCommands.move = [];
     }
 
-    await ctx.db.insert("orders", {
-      matchId: match._id,
-      playerId: player._id,
-      tankId: tank._id,
-      commands,
-      cursor: 0,
-      status: "queued",
-      createdAt: now,
-      updatedAt: now,
-    });
+    if (hadMoveCommands || queuedCommands.bearing.length > 0 || queuedCommands.cannon.length > 0) {
+      const existingOrders = await ctx.db
+        .query("orders")
+        .withIndex("by_player", (q) => q.eq("playerId", player._id))
+        .take(50);
 
-    return { accepted: commands };
+      if (hadMoveCommands) {
+        await completeActiveOrdersForQueue(ctx, existingOrders, tank._id, "move", now);
+      }
+      if (queuedCommands.bearing.length > 0) {
+        await completeActiveOrdersForQueue(ctx, existingOrders, tank._id, "bearing", now);
+      }
+      if (queuedCommands.cannon.length > 0) {
+        await completeActiveOrdersForQueue(ctx, existingOrders, tank._id, "cannon", now);
+      }
+    }
+
+    for (const queueType of ORDER_QUEUE_TYPES) {
+      const commands = queuedCommands[queueType];
+      if (commands.length === 0) {
+        continue;
+      }
+
+      await ctx.db.insert("orders", {
+        matchId: match._id,
+        playerId: player._id,
+        tankId: tank._id,
+        queueType,
+        commands,
+        cursor: 0,
+        status: "queued",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    return { accepted: acceptedCommands };
   },
 });
 
@@ -606,255 +637,6 @@ async function findAgentPlayer(ctx: any, matchId: any, agentKey: string) {
     .unique();
 }
 
-function normalizeOrderCommand(command: string): string[] {
-  if (/[;,\n]/.test(command)) {
-    return command.split(/[;,\n]+/).flatMap(normalizeOrderCommand);
-  }
-
-  const normalized = command.trim().toLowerCase().replace(/\s+/g, " ");
-  const parsed = parseInputCommand(normalized);
-  return parsed ? [serializeCommand(parsed)] : [];
-}
-
-function parseInputCommand(command: string): StoredCommand | null {
-  const parsed = parseStoredCommand(command);
-  if (!parsed) {
-    return null;
-  }
-
-  if (parsed.action === "bear" || parsed.action === "aim") {
-    const [, rawAmount] = command.trim().toLowerCase().replace(/\s+/g, " ").split(" ");
-    const bearing = strictHeading(rawAmount);
-    return bearing === null ? null : { action: parsed.action, bearing: roundForStorage(bearing) };
-  }
-
-  return parsed;
-}
-
-function parseStoredCommand(command: string): StoredCommand | null {
-  const [rawAction, rawAmount, rawSecondAmount, extra] = command.trim().toLowerCase().replace(/\s+/g, " ").split(" ");
-  const action = expandCommandAction(rawAction);
-  if (extra !== undefined) {
-    return null;
-  }
-
-  if (action === "bear") {
-    const bearing = strictNumber(rawAmount, 0, 360);
-    return bearing === null || rawSecondAmount !== undefined ? null : { action, bearing: roundForStorage(normalizeDegrees(bearing)) };
-  }
-
-  if (action === "move") {
-    const units = strictNumber(rawAmount, -MAX_MOVE_COMMAND_UNITS, MAX_MOVE_COMMAND_UNITS);
-    return units === null || rawSecondAmount !== undefined ? null : { action, units: roundForStorage(units) };
-  }
-
-  if (action === "aim") {
-    const bearing = strictNumber(rawAmount, 0, 360);
-    return bearing === null || rawSecondAmount !== undefined ? null : { action, bearing: roundForStorage(normalizeDegrees(bearing)) };
-  }
-
-  if (action === "elev") {
-    const elevation = strictNumber(rawAmount, MIN_AIM_ELEVATION_DEGREES, MAX_AIM_ELEVATION_DEGREES);
-    return elevation === null || rawSecondAmount !== undefined ? null : { action, elevation: roundForStorage(elevation) };
-  }
-
-  if (action === "pow") {
-    const power = strictNumber(rawAmount, MIN_FIRE_POWER, MAX_FIRE_POWER);
-    return power === null || rawSecondAmount !== undefined ? null : { action, power: roundForStorage(power) };
-  }
-
-  if (action === "fire") {
-    return rawAmount === undefined && rawSecondAmount === undefined ? { action } : null;
-  }
-
-  if (action === "ret") {
-    return rawAmount === undefined && rawSecondAmount === undefined ? { action } : null;
-  }
-
-  return null;
-}
-
-function serializeCommand(command: StoredCommand) {
-  if (command.action === "bear") {
-    return `bear ${roundForStorage(command.bearing)}`;
-  }
-  if (command.action === "move") {
-    return `move ${roundForStorage(command.units)}`;
-  }
-  if (command.action === "aim") {
-    return `aim ${roundForStorage(command.bearing)}`;
-  }
-  if (command.action === "elev") {
-    return `elev ${roundForStorage(command.elevation)}`;
-  }
-  if (command.action === "pow") {
-    return `pow ${roundForStorage(command.power)}`;
-  }
-  if (command.action === "ret") {
-    return command.action;
-  }
-  return "fire";
-}
-
-function expandCommandAction(action: string | undefined) {
-  if (action === "b") {
-    return "bear";
-  }
-  if (action === "m") {
-    return "move";
-  }
-  if (action === "a") {
-    return "aim";
-  }
-  if (action === "e") {
-    return "elev";
-  }
-  if (action === "p") {
-    return "pow";
-  }
-  if (action === "f") {
-    return "fire";
-  }
-  if (action === "r") {
-    return "ret";
-  }
-  return action;
-}
-
-function spawnPoint(index: 0 | 1) {
-  return index === 0
-    ? {
-      x: UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS,
-      y: UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS,
-    }
-    : {
-      x: (BOARD_SIZE - 1) * UNITS_PER_SQUARE - TANK_COLLISION_RADIUS_UNITS,
-      y: (BOARD_SIZE - 1) * UNITS_PER_SQUARE - TANK_COLLISION_RADIUS_UNITS,
-    };
-}
-
 function cleanName(name: string) {
   return name.trim().replace(/\s+/g, " ").slice(0, 32);
-}
-
-function cleanBattleName(name: string | undefined) {
-  return name?.trim().replace(/\s+/g, " ").slice(0, 48) || "Battle";
-}
-
-function normalizeRoom(roomCode: string) {
-  return roomCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8) || "Room";
-}
-
-function normalizeLobbyId(lobbyId: string | undefined) {
-  return lobbyId?.trim().toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 24) || DEFAULT_LOBBY_ID;
-}
-
-function normalizeDegrees(degrees: number) {
-  return ((degrees % 360) + 360) % 360;
-}
-
-function angleFromDirection(direction: number | "north" | "east" | "south" | "west") {
-  if (typeof direction === "number" && Number.isFinite(direction)) {
-    return direction;
-  }
-  return {
-    north: 0,
-    east: 90,
-    south: 180,
-    west: 270,
-  }[direction] ?? 0;
-}
-
-function normalizeTankSpec(spec: any) {
-  if (!spec) {
-    return {
-      hullColor: "#24f7a7",
-      turretOffset: 0.333,
-      cannonLength: 0.4,
-      turretSize: 0.92,
-    };
-  }
-
-  return {
-    hullColor: typeof spec.hullColor === "string" ? spec.hullColor : "#24f7a7",
-    turretOffset: clampFinite(spec.turretOffset, 0.24, 0.66, 0.333),
-    cannonLength: clampFinite(spec.cannonLength, 0.3, 0.56, 0.4),
-    turretSize: clampFinite(spec.turretSize, 0.74, 1.06, 0.92),
-  };
-}
-
-function tankSpecFromSeed(seed: string) {
-  const hash = hashString(seed);
-  return {
-    hullColor: TANK_COLORS[pick(hash, 0, TANK_COLORS.length)],
-    turretOffset: TURRET_OFFSETS[pick(hash, 8, TURRET_OFFSETS.length)],
-    cannonLength: CANNON_LENGTHS[pick(hash, 16, CANNON_LENGTHS.length)],
-    turretSize: TURRET_SIZES[pick(hash, 24, TURRET_SIZES.length)],
-  };
-}
-
-function pick(hash: number, shift: number, length: number) {
-  return Math.abs(hash >> shift) % length;
-}
-
-function hashString(value: string) {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return hash;
-}
-
-function strictNumber(rawAmount: string | undefined, min: number, max: number) {
-  if (rawAmount === undefined) {
-    return null;
-  }
-
-  const amount = Number(rawAmount);
-  if (!Number.isFinite(amount) || amount < min || amount > max) {
-    return null;
-  }
-  return amount;
-}
-
-function strictHeading(rawAmount: string | undefined) {
-  const heading = strictNumber(rawAmount, 0, 36);
-  return heading === null ? null : normalizeDegrees(heading * 10);
-}
-
-function clampFinite(value: unknown, min: number, max: number, fallback: number) {
-  return typeof value === "number" && Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
-}
-
-function clampInteger(value: number, min: number, max: number) {
-  if (!Number.isFinite(value)) {
-    return min;
-  }
-  return Math.max(min, Math.min(max, Math.floor(value)));
-}
-
-function roundForStorage(value: number) {
-  return Math.round(value * 10000) / 10000;
-}
-
-function moveCommandUnitsToDistance(units: number) {
-  return (units / MOVE_COMMAND_UNITS_PER_SQUARE) * UNITS_PER_SQUARE;
-}
-
-function distanceToMoveCommandUnits(distance: number) {
-  return roundForStorage((distance / UNITS_PER_SQUARE) * MOVE_COMMAND_UNITS_PER_SQUARE);
-}
-
-function unitsPerTickToSquaresPerSecond(unitsPerTick: number) {
-  return roundForStorage((unitsPerTick / UNITS_PER_SQUARE) * FRAME_RATE);
-}
-
-function vectorLength(vector: { x: number; y: number }) {
-  return Math.hypot(vector.x, vector.y);
-}
-
-async function sha256(value: string) {
-  const buffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

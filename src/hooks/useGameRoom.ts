@@ -5,8 +5,11 @@ import type { Id } from "../../convex/_generated/dataModel";
 import { GameRoom } from "../libs/GameRoom";
 import { Orders } from "../libs/Orders";
 
-export function useGameRoom(roomCode: string) {
-  const room = useQuery(api.game.getRoom, { roomCode });
+export function useGameRoom(roomCode: string, commanderId?: Id<"commanderProfiles"> | "") {
+  const room = useQuery(api.game.getRoom, {
+    roomCode,
+    ...(commanderId ? { commanderId } : {}),
+  });
   const createRoom = useMutation(api.game.createRoom);
   const joinRoom = useMutation(api.game.joinRoom);
   const runPlayerTick = useMutation(api.game.runPlayerTick);
@@ -41,6 +44,7 @@ export function useGameRoom(roomCode: string) {
           room.projectiles,
           room.orders,
           room.events,
+          Boolean(room.ownPendingWork),
         )
       : null,
     createRoom,

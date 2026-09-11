@@ -26,6 +26,7 @@ export class GameRoom {
     projectiles: ProjectileRecord[],
     readonly orders: OrderRecord[],
     events: WorldEventRecord[] = [],
+    readonly ownPendingWork = false,
   ) {
     this.board = board ? new Board(board) : null;
     this.players = players.map((player) => new Player(player));
