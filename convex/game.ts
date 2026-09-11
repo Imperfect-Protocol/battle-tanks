@@ -504,8 +504,9 @@ async function queuePlayerCommands(ctx: any, match: any, player: any, tank: any,
     return;
   }
 
+  const hadMoveCommands = queuedCommands.move.length > 0;
   const activeMoveRemaining = clampFinite(tank.moveRemaining, -MAX_MOVE_DISTANCE_UNITS * 4, MAX_MOVE_DISTANCE_UNITS * 4, 0);
-  if (Math.abs(activeMoveRemaining) > 0.5 && queuedCommands.move.length > 0) {
+  if (Math.abs(activeMoveRemaining) > 0.5 && hadMoveCommands) {
     const extraDistance = queuedCommands.move.reduce((total, command) => {
       const parsed = parseStoredCommand(command);
       return parsed?.action === "move" ? total + moveCommandUnitsToDistance(parsed.units) : total;
@@ -517,12 +518,15 @@ async function queuePlayerCommands(ctx: any, match: any, player: any, tank: any,
     queuedCommands.move = [];
   }
 
-  if (queuedCommands.bearing.length > 0 || queuedCommands.cannon.length > 0) {
+  if (hadMoveCommands || queuedCommands.bearing.length > 0 || queuedCommands.cannon.length > 0) {
     const existingOrders = await ctx.db
       .query("orders")
       .withIndex("by_player", (q: any) => q.eq("playerId", player._id))
       .take(50);
 
+    if (hadMoveCommands) {
+      await completeActiveOrdersForQueue(ctx, existingOrders, tank._id, "move", now);
+    }
     if (queuedCommands.bearing.length > 0) {
       await completeActiveOrdersForQueue(ctx, existingOrders, tank._id, "bearing", now);
     }
@@ -1093,6 +1097,26 @@ async function abortTankOrders(ctx: any, orders: any[], tankIds: any[], now: num
     if (!tankIdsToAbort.has(order.tankId) || order.status === "complete") {
       continue;
     }
+    await ctx.db.patch(order._id, {
+      cursor: order.commands.length,
+      status: "complete",
+      updatedAt: now,
+    });
+  }
+}
+
+async function completeActiveOrdersForQueue(
+  ctx: any,
+  orders: any[],
+  tankId: any,
+  queueType: OrderQueueType,
+  now: number,
+) {
+  for (const order of orders) {
+    if (order.tankId !== tankId || order.status === "complete" || orderQueueType(order) !== queueType) {
+      continue;
+    }
+
     await ctx.db.patch(order._id, {
       cursor: order.commands.length,
       status: "complete",
