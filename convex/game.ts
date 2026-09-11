@@ -71,6 +71,31 @@ const LAUNCH_RANGE_BY_ANGLE: Record<number, number> = {
   45: 6 * UNITS_PER_SQUARE,
   60: 4 * UNITS_PER_SQUARE,
 };
+const DEFAULT_TANK_SPEC = {
+  hullColor: "#24f7a7",
+  turretOffset: 0.333,
+  cannonLength: 0.4,
+  turretSize: 0.92,
+};
+const tankSpecValidator = v.object({
+  hullColor: v.string(),
+  turretOffset: v.number(),
+  cannonLength: v.number(),
+  turretSize: v.number(),
+});
+const TANK_COLORS = ["#24f7a7", "#40d8ff", "#ffe45c", "#ff6b9d", "#b5ff5c", "#ff9c45"];
+const TURRET_OFFSETS = [0.28, 0.333, 0.4, 0.48, 0.58];
+const CANNON_LENGTHS = [0.32, 0.38, 0.44, 0.5, 0.56];
+const TURRET_SIZES = [0.76, 0.84, 0.92, 1, 1.06];
+
+type StoredCommand =
+  | { action: "bear"; bearing: number }
+  | { action: "move"; units: number }
+  | { action: "aim"; bearing: number }
+  | { action: "elev"; elevation: number }
+  | { action: "pow"; power: number }
+  | { action: "fire" }
+  | { action: "ret" };
 
 type CollisionDetails =
   | { type: "none"; position: { x: number; y: number } }
@@ -218,6 +243,48 @@ export const listBattles = query({
           : false,
         createdAt: match.createdAt,
         updatedAt: match.updatedAt,
+      });
+    }
+
+    return rows;
+  },
+});
+
+export const getLeaderboard = query({
+  args: {},
+  returns: v.array(
+    v.object({
+      commanderId: v.id("commanderProfiles"),
+      displayName: v.string(),
+      tankSpec: v.optional(tankSpecValidator),
+      wins: v.number(),
+      losses: v.number(),
+      draws: v.number(),
+      battles: v.number(),
+    }),
+  ),
+  handler: async (ctx) => {
+    const stats = await ctx.db
+      .query("commanderStats")
+      .withIndex("by_wins")
+      .order("desc")
+      .take(10);
+
+    const rows = [];
+    for (const entry of stats) {
+      const commander = await ctx.db.get(entry.commanderId);
+      if (!commander) {
+        continue;
+      }
+
+      rows.push({
+        commanderId: commander._id,
+        displayName: commander.displayName,
+        ...(commander.tankSpec ? { tankSpec: commander.tankSpec } : {}),
+        wins: entry.wins,
+        losses: entry.losses,
+        draws: entry.draws,
+        battles: entry.wins + entry.losses + entry.draws,
       });
     }
 
@@ -648,6 +715,78 @@ async function advanceSinglePlayerTick(ctx: any, match: any, player: any, observ
     playerPatch.finishedAt = now;
   }
   await ctx.db.patch(player._id, playerPatch);
+  await finalizeMatchIfNeeded(ctx, match, now);
+}
+
+async function finalizeMatchIfNeeded(ctx: any, match: any, now: number) {
+  const currentMatch = await ctx.db.get(match._id);
+  if (!currentMatch || currentMatch.status === "finished") {
+    return;
+  }
+
+  const players = await ctx.db
+    .query("players")
+    .withIndex("by_match", (q: any) => q.eq("matchId", currentMatch._id))
+    .take(2);
+  const tanks = await ctx.db
+    .query("tanks")
+    .withIndex("by_match", (q: any) => q.eq("matchId", currentMatch._id))
+    .take(2);
+  const result = resolveMatchEnd(players, tanks);
+
+  if (!result.finished) {
+    return;
+  }
+
+  await ctx.db.patch(currentMatch._id, {
+    status: "finished",
+    finishedAt: now,
+    updatedAt: now,
+    ...(result.winnerPlayerId ? { winnerPlayerId: result.winnerPlayerId } : {}),
+  });
+
+  for (const participant of players) {
+    if (!participant.commanderId) {
+      continue;
+    }
+
+    await recordCommanderResult(
+      ctx,
+      participant.commanderId,
+      result.winnerPlayerId
+        ? participant._id === result.winnerPlayerId ? "win" : "loss"
+        : "draw",
+      now,
+    );
+  }
+}
+
+async function recordCommanderResult(ctx: any, commanderId: any, result: "win" | "loss" | "draw", now: number) {
+  const existing = await ctx.db
+    .query("commanderStats")
+    .withIndex("by_commander", (q: any) => q.eq("commanderId", commanderId))
+    .unique();
+  const increment = {
+    wins: result === "win" ? 1 : 0,
+    losses: result === "loss" ? 1 : 0,
+    draws: result === "draw" ? 1 : 0,
+  };
+
+  if (existing) {
+    await ctx.db.patch(existing._id, {
+      wins: existing.wins + increment.wins,
+      losses: existing.losses + increment.losses,
+      draws: existing.draws + increment.draws,
+      updatedAt: now,
+    });
+    return;
+  }
+
+  await ctx.db.insert("commanderStats", {
+    commanderId,
+    ...increment,
+    updatedAt: now,
+  });
 }
 
 async function findCommanderPlayer(ctx: any, matchId: any, commanderId: any) {

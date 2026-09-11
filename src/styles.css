@@ -652,6 +652,78 @@ button {
   padding: 20px;
 }
 
+.leaderboard-panel {
+  margin: 0 auto;
+  max-width: 1180px;
+  overflow: hidden;
+  padding: 20px;
+}
+
+.leaderboard-panel__copy {
+  color: #64dcb5;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  margin: 6px 0 0;
+  text-transform: uppercase;
+}
+
+.leaderboard-table {
+  min-width: 660px;
+}
+
+.leaderboard-commander {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+}
+
+.leaderboard-commander .tank-avatar {
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin-top: 0;
+}
+
+.leaderboard-commander .tank-avatar__turret {
+  color: #02100c;
+  display: flex;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.42rem;
+  margin-top: 0;
+}
+
+.leaderboard-commander .tank-avatar__barrel,
+.leaderboard-commander .tank-avatar__light {
+  margin-top: 0;
+}
+
+.leaderboard-rank,
+.leaderboard-value {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.leaderboard-rank--1 {
+  color: #ffe45c;
+}
+
+.leaderboard-rank--2 {
+  color: #d1e5e1;
+}
+
+.leaderboard-rank--3 {
+  color: #e7a86d;
+}
+
+.leaderboard-value--win {
+  color: #24f7a7;
+  font-weight: 900;
+}
+
+.leaderboard-value--loss {
+  color: #ff8790;
+}
+
 .panel-heading {
   align-items: center;
   display: flex;

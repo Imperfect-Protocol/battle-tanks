@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { CommanderProvider, useCommander } from "./CommanderContext";
 import { BattlePage } from "../pages/BattlePage";
 import { LobbyPage } from "../pages/LobbyPage";
+import { LeaderboardPage } from "../pages/LeaderboardPage";
 import { MainLobbyPage } from "../pages/MainLobbyPage";
 import { PlaceholderPage } from "../pages/PlaceholderPage";
 import { SignInPage } from "../pages/SignInPage";
@@ -36,7 +37,7 @@ export default function App() {
           path="/leaderboard"
           element={
             <RequireCommander>
-              <PlaceholderPage eyebrow="Leaderboard" title="Leaderboard" />
+              <LeaderboardPage />
             </RequireCommander>
           }
         />
