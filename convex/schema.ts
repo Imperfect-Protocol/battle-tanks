@@ -34,6 +34,16 @@ export default defineSchema({
     .index("by_user", ["userId"])
     .index("by_display_name", ["displayName"]),
 
+  commanderStats: defineTable({
+    commanderId: v.id("commanderProfiles"),
+    wins: v.number(),
+    losses: v.number(),
+    draws: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_commander", ["commanderId"])
+    .index("by_wins", ["wins"]),
+
   boards: defineTable({
     code: v.string(),
     name: v.string(),
@@ -108,6 +118,7 @@ export default defineSchema({
     matchId: v.id("matches"),
     playerId: v.id("players"),
     tankId: v.id("tanks"),
+    queueType: v.optional(v.union(v.literal("move"), v.literal("bearing"), v.literal("cannon"))),
     commands: v.array(v.string()),
     cursor: v.number(),
     status: v.union(

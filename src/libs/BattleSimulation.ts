@@ -73,6 +73,7 @@ export class BattleSimulation {
   private winnerPlayerId: string | undefined;
   private localPlayerId: string | null = null;
   private pendingCheckpoints: BattleCheckpoint[] = [];
+  private locallyOriginatedCommandIds = new Set<string>();
 
   sync(room: GameRoom | null, now: number, localPlayerId: string | null = null) {
     if (!room?.match || !room.board) {
@@ -128,8 +129,10 @@ export class BattleSimulation {
       if (!parsed) {
         continue;
       }
+      const id = createClientCommandId();
+      this.locallyOriginatedCommandIds.add(id);
       tank.queues[queueTypeForCommand(parsed.action)].push({
-        id: createClientCommandId(),
+        id,
         playerId,
         command,
         local: true,
@@ -151,6 +154,7 @@ export class BattleSimulation {
     this.finishedAt = room.match?.finishedAt;
     this.winnerPlayerId = room.match?.winnerPlayerId;
     this.pendingCheckpoints = [];
+    this.locallyOriginatedCommandIds = new Set();
   }
 
   private applyCommandBatches(commandBatches: PlayerCommandRecord[]) {
@@ -158,6 +162,9 @@ export class BattleSimulation {
     for (const batch of batches) {
       if (batch.status === "complete") {
         this.removeCommandFromQueues(batch._id);
+        if (batch.clientCommandId) {
+          this.removeCommandFromQueues(batch.clientCommandId);
+        }
         this.appliedCommandBatches.add(batch._id);
         continue;
       }
@@ -169,6 +176,10 @@ export class BattleSimulation {
       this.appliedCommandBatches.add(batch._id);
       const tank = this.tankForPlayer(batch.playerId);
       if (!tank || tank.health <= 0) {
+        continue;
+      }
+
+      if (batch.playerId === this.localPlayerId && batch.clientCommandId && this.locallyOriginatedCommandIds.has(batch.clientCommandId)) {
         continue;
       }
 
@@ -351,7 +362,7 @@ export class BattleSimulation {
     const stoppingDistance = (speed * speed) / (2 * ACCELERATION_UNITS_PER_TICK);
     const targetSpeed = Math.abs(remaining) <= stoppingDistance + 20 ? 0 : direction * MAX_SPEED_UNITS_PER_TICK;
     const nextSpeed = stepToward(speed, targetSpeed, ACCELERATION_UNITS_PER_TICK * ticks);
-    const travel = clampMagnitude(nextSpeed * ticks, Math.abs(remaining)) * Math.sign(nextSpeed || remaining);
+    const travel = clampMagnitude(nextSpeed * ticks, Math.abs(remaining));
     const vector = vectorFromBearing(angleFromDirection(tank.hullDirection), travel);
 
     tank.position = clampTankPosition({

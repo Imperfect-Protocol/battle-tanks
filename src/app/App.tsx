@@ -3,7 +3,9 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { CommanderProvider, useCommander } from "./CommanderContext";
 import { BattlePage } from "../pages/BattlePage";
 import { LobbyPage } from "../pages/LobbyPage";
+import { LeaderboardPage } from "../pages/LeaderboardPage";
 import { MainLobbyPage } from "../pages/MainLobbyPage";
+import { PlaceholderPage } from "../pages/PlaceholderPage";
 import { SignInPage } from "../pages/SignInPage";
 import { SplashPage } from "../pages/SplashPage";
 import { StandByPage } from "../pages/StandByPage";
@@ -28,6 +30,22 @@ export default function App() {
           element={
             <RequireCommander>
               <LobbyPage />
+            </RequireCommander>
+          }
+        />
+        <Route
+          path="/leaderboard"
+          element={
+            <RequireCommander>
+              <LeaderboardPage />
+            </RequireCommander>
+          }
+        />
+        <Route
+          path="/settings"
+          element={
+            <RequireCommander>
+              <PlaceholderPage eyebrow="Settings" title="Settings" />
             </RequireCommander>
           }
         />

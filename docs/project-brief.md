@@ -68,10 +68,10 @@ Convex stores the shared game state as plain serializable records:
 - `matches`: room code, board id, status, current tick, and winner
 - `players`: commander name, slot, and score
 - `tanks`: position, velocity, health, hull direction, turret direction, and selected ammo
-- `orders`: command scripts queued by each player
+- `orders`: player command lanes split into movement, hull bearing, and cannon/turret queues
 - `projectiles`: active and spent missiles
 
-Convex queries let every browser subscribe to the same room state. Convex mutations create rooms, join players, submit orders, and advance the next game tick.
+Convex queries let every browser subscribe to the same room state. Convex mutations create rooms, join players, submit orders, and advance the next game tick. Submitted commands are compressed into three queues: movement commands stay additive, hull bearing commands keep the latest target, and cannon/turret commands keep the latest settings between fire commands.
 
 ### Domain Library
 

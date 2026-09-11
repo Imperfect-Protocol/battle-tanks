@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { closeCurrentTab } from "../libs/browserTab";
+import { allowTabCloseWithoutPrompt, closeCurrentTab } from "../libs/browserTab";
 
 const CLOSE_AFTER_MS = 10 * 60 * 1000;
 
@@ -10,6 +10,8 @@ export function StandByPage() {
   const [startedAt] = useState(Date.now);
   const [now, setNow] = useState(Date.now);
   const remainingMs = Math.max(0, CLOSE_AFTER_MS - (now - startedAt));
+
+  useEffect(() => allowTabCloseWithoutPrompt(), []);
 
   useEffect(() => {
     if (remainingMs <= 0) {

@@ -43,6 +43,8 @@ export function BattlePage() {
       now - gameRoom.match.finishedAt >= GAME_OVER_DELAY_MS,
   );
 
+  useEffect(() => allowTabCloseWithoutPrompt(), []);
+
   useEffect(() => {
     if (!gameRoom?.match || showGameOver) {
       return;
