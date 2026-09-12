@@ -37,6 +37,7 @@ export function useGameRoom(roomCode: string, commanderId?: Id<"commanderProfile
             room.orders,
             room.events,
             room.commandBatches ?? [],
+            room.commandTimelines ?? [],
             Boolean(room.ownPendingWork),
           )
         : null,

@@ -56,6 +56,7 @@ const EXPLOSION_DURATION_MS = 1000;
 const WORLD_EVENT_TTL_MS = 5000;
 const WORLD_EVENT_CLEANUP_WINDOW_MS = 60_000;
 const MIN_TICK_INTERVAL_MS = 35;
+const TIMELINE_PLAYBACK_DELAY_MS = 350;
 const ROTATION_DEGREES_PER_TICK = 360 / (3 * FRAME_RATE);
 const MAX_SPEED_UNITS_PER_TICK = (3 * UNITS_PER_SQUARE) / FRAME_RATE;
 const ACCELERATION_UNITS_PER_TICK = MAX_SPEED_UNITS_PER_TICK / (FRAME_RATE * 0.8);
@@ -131,6 +132,20 @@ const nextCommandInput = v.object({
   command: v.string(),
 });
 
+const worldEventInput = v.object({
+  clientEventId: v.string(),
+  sourceTankId: v.id("tanks"),
+  targetTankId: v.optional(v.id("tanks")),
+  type: v.union(v.literal("explosion"), v.literal("tankCollision")),
+  position: vectorInput,
+  normal: v.optional(vectorInput),
+  radius: v.optional(v.number()),
+  damage: v.number(),
+  impactSpeed: v.optional(v.number()),
+  penetration: v.optional(v.number()),
+  expiresAt: v.number(),
+});
+
 export const getRoom = query({
   args: {
     roomCode: v.string(),
@@ -161,6 +176,28 @@ export const getRoom = query({
       .withIndex("by_match_and_created_at", (q) => q.eq("matchId", match._id))
       .order("desc")
       .take(250)).reverse();
+    const now = Date.now();
+    const commandTimelines = (await ctx.db
+      .query("commandTimelines")
+      .withIndex("by_match_and_ended_at", (q) => q.eq("matchId", match._id).gte("endedAt", now - 5_000))
+      .take(120));
+    const events = await ctx.db
+      .query("worldEvents")
+      .withIndex("by_match_and_expires_at", (q) => q.eq("matchId", match._id).gte("expiresAt", now))
+      .take(40);
+    const viewerPlayer = args.commanderId
+      ? players.find((player) => player.commanderId === args.commanderId)
+      : null;
+    const appliedEventIds = new Set(
+      viewerPlayer
+        ? (await ctx.db
+          .query("worldEventApplications")
+          .withIndex("by_player_and_created_at", (q) => q.eq("playerId", viewerPlayer._id).gte("createdAt", now - WORLD_EVENT_TTL_MS))
+          .take(80))
+          .map((application) => application.eventId)
+        : [],
+    );
+    const visibleEvents = events.filter((event) => !appliedEventIds.has(event._id));
     const matchEnd = resolveMatchEnd(players, tanks);
     const finishedAt = match.finishedAt ?? (matchEnd.finished
       ? tanks
@@ -175,7 +212,7 @@ export const getRoom = query({
       ...(finishedAt ? { finishedAt } : {}),
     };
 
-    return { match: viewMatch, board, players, tanks, orders: [], projectiles: [], events: [], commandBatches, ownPendingWork: false };
+    return { match: viewMatch, board, players, tanks, orders: [], projectiles: [], events: visibleEvents, commandBatches, commandTimelines, ownPendingWork: false };
   },
 });
 
@@ -503,6 +540,11 @@ export const sendCommands = mutation({
       throw new Error("Join the room before submitting orders");
     }
 
+    const tank = await findPlayerTank(ctx, match._id, player._id);
+    if (!tank) {
+      throw new Error("Tank not found");
+    }
+
     const commands = [];
     for (const command of args.commands) {
       const normalizedCommands = normalizeOrderCommand(command);
@@ -516,233 +558,233 @@ export const sendCommands = mutation({
       return null;
     }
 
-    for (const [index, command] of commands.entries()) {
+    await planCommandTimelines(ctx, match, player, tank, commands, now);
+
+    return null;
+  },
+});
+
+async function planCommandTimelines(ctx: any, match: any, player: any, tank: any, commands: string[], now: number) {
+  const byQueue = emptyCommandQueues();
+  for (const command of commands) {
+    const parsed = parseStoredCommand(command);
+    if (!parsed) {
+      throw new Error("Incorrect command");
+    }
+    byQueue[queueTypeForCommand(parsed)].push(command);
+  }
+
+  const state = {
+    position: cleanPosition(tank.position),
+    hullDirection: angleFromDirection(tank.hullDirection),
+    turretDirection: angleFromDirection(tank.turretDirection),
+    turretLocked: tank.turretLocked ?? true,
+    launchAngle: clampFinite(tank.launchAngle, MIN_AIM_ELEVATION_DEGREES, MAX_AIM_ELEVATION_DEGREES, DEFAULT_FIRE_ANGLE_DEGREES),
+    cannonPower: clampFinite(tank.cannonPower ?? tank.lastFirePower, MIN_FIRE_POWER, MAX_FIRE_POWER, DEFAULT_FIRE_POWER),
+    tankSpec: normalizeTankSpec(tank.tankSpec),
+  };
+
+  for (const queueType of ORDER_QUEUE_TYPES) {
+    let cursorAt = await nextTimelineStart(ctx, player._id, queueType, now + TIMELINE_PLAYBACK_DELAY_MS);
+    for (const command of byQueue[queueType]) {
       const parsed = parseStoredCommand(command);
       if (!parsed) {
-        throw new Error("Incorrect command");
+        continue;
       }
 
-      await ctx.db.insert("playerCommands", {
+      const timeline = planTimeline(queueType, command, parsed, state, cursorAt);
+      await ctx.db.insert("commandTimelines", {
         matchId: match._id,
         playerId: player._id,
-        commanderId: commander.commanderId,
-        queueType: queueTypeForCommand(parsed),
-        commands: [command],
-        status: "queued",
-        createdAt: now + index,
-      });
-    }
-
-    return null;
-  },
-});
-
-export const checkpointBattleState = mutation({
-  args: {
-    roomCode: v.string(),
-    commanderId: v.id("commanderProfiles"),
-    completedCommandIds: v.array(v.id("playerCommands")),
-    completedClientCommandIds: v.optional(v.array(v.string())),
-    nextCommands: v.optional(v.array(nextCommandInput)),
-    tanks: v.array(tankCheckpoint),
-    finished: v.optional(v.object({
-      winnerPlayerId: v.optional(v.id("players")),
-      finishedAt: v.number(),
-    })),
-  },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    const now = Date.now();
-    const roomCode = normalizeRoom(args.roomCode);
-    const match = await ctx.db
-      .query("matches")
-      .withIndex("by_room_code", (q) => q.eq("roomCode", roomCode))
-      .unique();
-
-    if (!match) {
-      return null;
-    }
-
-    const commander = await requireCommanderProfile(ctx, args.commanderId);
-    const player = await findCommanderPlayer(ctx, match._id, commander.commanderId);
-    if (!player) {
-      throw new Error("Join the room before saving battle state");
-    }
-
-    for (const commandId of args.completedCommandIds.slice(0, 6)) {
-      const command = await ctx.db.get(commandId);
-      if (!command || command.matchId !== match._id || command.playerId !== player._id || command.status === "complete") {
-        continue;
-      }
-
-      await ctx.db.patch(commandId, {
-        status: "complete",
-        completedAt: now,
-      });
-    }
-
-    for (const clientCommandId of (args.completedClientCommandIds ?? []).slice(0, 6)) {
-      const command = await ctx.db
-        .query("playerCommands")
-        .withIndex("by_player_and_client_command_id", (q) => q.eq("playerId", player._id).eq("clientCommandId", cleanClientCommandId(clientCommandId)))
-        .unique();
-      if (!command || command.matchId !== match._id || command.status === "complete") {
-        continue;
-      }
-
-      await ctx.db.patch(command._id, {
-        status: "complete",
-        completedAt: now,
-      });
-    }
-
-    for (const nextCommand of (args.nextCommands ?? []).slice(0, 3)) {
-      const command = cleanSingleCommand(nextCommand.command);
-      const parsed = command ? parseStoredCommand(command) : null;
-      if (!command || !parsed || queueTypeForCommand(parsed) !== nextCommand.queueType) {
-        throw new Error("Incorrect command");
-      }
-
-      const clientCommandId = cleanClientCommandId(nextCommand.clientCommandId);
-      const existing = await ctx.db
-        .query("playerCommands")
-        .withIndex("by_player_and_client_command_id", (q) => q.eq("playerId", player._id).eq("clientCommandId", clientCommandId))
-        .unique();
-      if (existing) {
-        continue;
-      }
-
-      await ctx.db.insert("playerCommands", {
-        matchId: match._id,
-        playerId: player._id,
-        commanderId: commander.commanderId,
-        clientCommandId,
-        queueType: nextCommand.queueType,
-        commands: [command],
-        status: "queued",
+        tankId: tank._id,
+        queueType,
+        command,
+        startedAt: timeline.startedAt,
+        endedAt: timeline.endedAt,
+        points: timeline.points,
         createdAt: now,
       });
+      cursorAt = timeline.endedAt;
     }
+  }
 
-    for (const tankState of args.tanks.slice(0, 2)) {
-      const tank = await ctx.db.get(tankState.tankId);
-      if (!tank || tank.matchId !== match._id) {
-        continue;
-      }
+  await ctx.db.patch(tank._id, {
+    position: state.position,
+    velocity: { x: 0, y: 0 },
+    speed: 0,
+    moveRemaining: 0,
+    activeMoveCommand: "",
+    hullDirection: normalizeDegrees(state.hullDirection),
+    turretDirection: normalizeDegrees(state.turretDirection),
+    turretLocked: state.turretLocked,
+    launchAngle: state.launchAngle,
+    cannonPower: state.cannonPower,
+    lastFirePower: state.cannonPower,
+    updatedAt: now,
+  });
+  await ctx.db.patch(match._id, { updatedAt: now });
+}
 
-      await ctx.db.patch(tankState.tankId, cleanTankCheckpoint(tankState, now));
-      if (tankState.health <= 0) {
-        const tankPlayer = await ctx.db.get(tank.playerId);
-        if (tankPlayer && !tankPlayer.finishedAt) {
-          await ctx.db.patch(tank.playerId, { finishedAt: now });
-        }
-      }
+async function nextTimelineStart(ctx: any, playerId: any, queueType: OrderQueueType, now: number) {
+  const previous = await ctx.db
+    .query("commandTimelines")
+    .withIndex("by_player_queue_and_ended_at", (q: any) => q.eq("playerId", playerId).eq("queueType", queueType))
+    .order("desc")
+    .first();
+  return Math.max(now, previous?.endedAt ?? now);
+}
+
+function planTimeline(queueType: OrderQueueType, command: string, parsed: ReturnType<typeof parseStoredCommand> & {}, state: any, startedAt: number) {
+  if (queueType === "move" && parsed.action === "move") {
+    const distance = moveCommandUnitsToDistance(parsed.units);
+    const durationMs = Math.max(160, Math.round((Math.abs(distance) / (2 * UNITS_PER_SQUARE)) * 1000));
+    const from = state.position;
+    const delta = vectorFromBearing(state.hullDirection, distance);
+    const to = {
+      x: clamp(from.x + delta.x, UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS, (BOARD_SIZE - 1) * UNITS_PER_SQUARE - TANK_COLLISION_RADIUS_UNITS),
+      y: clamp(from.y + delta.y, UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS, (BOARD_SIZE - 1) * UNITS_PER_SQUARE - TANK_COLLISION_RADIUS_UNITS),
+    };
+    const points = linearTimelinePoints(startedAt, durationMs, (progress) => ({
+      position: {
+        x: from.x + (to.x - from.x) * progress,
+        y: from.y + (to.y - from.y) * progress,
+      },
+      velocity: progress >= 1 ? { x: 0, y: 0 } : {
+        x: (to.x - from.x) / Math.max(1, durationMs / 40),
+        y: (to.y - from.y) / Math.max(1, durationMs / 40),
+      },
+    }));
+    state.position = to;
+    return { startedAt, endedAt: startedAt + durationMs, points };
+  }
+
+  if (queueType === "bearing" && parsed.action === "bear") {
+    const fromHull = state.hullDirection;
+    const delta = shortestAngleDelta(fromHull, parsed.bearing);
+    const durationMs = Math.max(120, Math.round((Math.abs(delta) / 120) * 1000));
+    const fromTurret = state.turretDirection;
+    const points = linearTimelinePoints(startedAt, durationMs, (progress) => {
+      const hullDirection = normalizeDegrees(fromHull + delta * progress);
+      return {
+        hullDirection,
+        ...(state.turretLocked ? { turretDirection: normalizeDegrees(fromTurret + delta * progress) } : {}),
+      };
+    });
+    state.hullDirection = normalizeDegrees(fromHull + delta);
+    if (state.turretLocked) {
+      state.turretDirection = normalizeDegrees(fromTurret + delta);
     }
+    return { startedAt, endedAt: startedAt + durationMs, points };
+  }
 
-    if (match.status !== "finished") {
-      const tanks = await ctx.db
-        .query("tanks")
-        .withIndex("by_match", (q) => q.eq("matchId", match._id))
-        .take(2);
-      const matchEnd = resolveMatchEnd(await playersForMatch(ctx, match._id), tanks);
-      if (args.finished || matchEnd.finished) {
-        await ctx.db.patch(match._id, {
-          status: "finished",
-          winnerPlayerId: args.finished?.winnerPlayerId ?? matchEnd.winnerPlayerId,
-          finishedAt: args.finished?.finishedAt ?? now,
-          updatedAt: now,
-        });
-      }
+  if (queueType === "cannon" && parsed.action === "fire") {
+    const points = projectileTimelinePoints(state, startedAt);
+    return { startedAt, endedAt: points[points.length - 1]?.at ?? startedAt + 40, points };
+  }
+
+  const durationMs = parsed.action === "aim" || parsed.action === "ret"
+    ? Math.max(120, Math.round((Math.abs(shortestAngleDelta(state.turretDirection, parsed.action === "aim" ? parsed.bearing : state.hullDirection)) / 120) * 1000))
+    : 120;
+  const fromTurret = state.turretDirection;
+  const fromElevation = state.launchAngle;
+  const fromPower = state.cannonPower;
+  const targetTurret = parsed.action === "aim" ? parsed.bearing : parsed.action === "ret" ? state.hullDirection : fromTurret;
+  const turretDelta = shortestAngleDelta(fromTurret, targetTurret);
+  const points = linearTimelinePoints(startedAt, durationMs, (progress) => ({
+    turretDirection: normalizeDegrees(fromTurret + turretDelta * progress),
+    launchAngle: parsed.action === "elev" ? fromElevation + (parsed.elevation - fromElevation) * progress : state.launchAngle,
+    cannonPower: parsed.action === "pow" ? fromPower + (parsed.power - fromPower) * progress : state.cannonPower,
+  }));
+  if (parsed.action === "aim") {
+    state.turretDirection = normalizeDegrees(parsed.bearing);
+    state.turretLocked = false;
+  } else if (parsed.action === "ret") {
+    state.turretDirection = normalizeDegrees(state.hullDirection);
+    state.turretLocked = true;
+  } else if (parsed.action === "elev") {
+    state.launchAngle = parsed.elevation;
+  } else if (parsed.action === "pow") {
+    state.cannonPower = parsed.power;
+  }
+  return { startedAt, endedAt: startedAt + durationMs, points };
+}
+
+function linearTimelinePoints(startedAt: number, durationMs: number, pointAt: (progress: number) => Record<string, unknown>) {
+  const points = [];
+  const stepMs = 40;
+  for (let elapsed = 0; elapsed < durationMs; elapsed += stepMs) {
+    points.push({ at: startedAt + elapsed, ...pointAt(elapsed / durationMs) });
+  }
+  points.push({ at: startedAt + durationMs, ...pointAt(1) });
+  return points;
+}
+
+function projectileTimelinePoints(state: any, startedAt: number) {
+  const power = clampFinite(state.cannonPower, MIN_FIRE_POWER, MAX_FIRE_POWER, DEFAULT_FIRE_POWER);
+  const launch = launchVelocity(power, state.launchAngle);
+  const horizontalVelocity = vectorFromBearing(state.turretDirection, launch.horizontal);
+  const mountOffset = vectorFromBearing(
+    state.hullDirection,
+    (state.tankSpec.turretOffset - 0.5) * TANK_LENGTH_UNITS,
+  );
+  const barrelVector = vectorFromBearing(
+    state.turretDirection,
+    (state.tankSpec.turretSize * TANK_WIDTH_UNITS) / 2 + state.tankSpec.cannonLength * TANK_LENGTH_UNITS,
+  );
+  const muzzle = clampProjectilePosition({
+    x: state.position.x + mountOffset.x + barrelVector.x,
+    y: state.position.y + mountOffset.y + barrelVector.y,
+  }, BOARD_SIZE);
+  const points = [];
+
+  for (let elapsed = 0; elapsed <= 4000; elapsed += 40) {
+    const ticks = elapsed / 40;
+    const nextPosition = {
+      x: muzzle.x + horizontalVelocity.x * ticks,
+      y: muzzle.y + horizontalVelocity.y * ticks,
+    };
+    const nextHeight = launch.vertical * ticks - 0.5 * PROJECTILE_GRAVITY_UNITS * ticks * ticks;
+    const nextVerticalVelocity = launch.vertical - PROJECTILE_GRAVITY_UNITS * ticks;
+    const hitsWall =
+      nextPosition.x <= UNITS_PER_SQUARE ||
+      nextPosition.y <= UNITS_PER_SQUARE ||
+      nextPosition.x >= BOARD_SIZE * UNITS_PER_SQUARE - UNITS_PER_SQUARE ||
+      nextPosition.y >= BOARD_SIZE * UNITS_PER_SQUARE - UNITS_PER_SQUARE;
+    const hitsGround = elapsed > 0 && nextHeight <= 0 && nextVerticalVelocity < 0;
+    const position = clampProjectilePosition(nextPosition, BOARD_SIZE);
+
+    points.push({
+      at: startedAt + elapsed,
+      projectilePosition: position,
+      projectileVelocity: horizontalVelocity,
+      projectileHeight: Math.max(0, nextHeight),
+      projectileVerticalVelocity: nextVerticalVelocity,
+      projectileStatus: hitsWall || hitsGround ? "exploding" : "active",
+      fire: elapsed === 0,
+    });
+
+    if (hitsWall || hitsGround) {
+      break;
     }
+  }
 
-    return null;
-  },
-});
+  return points.length > 0 ? points : [{
+    at: startedAt,
+    projectilePosition: muzzle,
+    projectileVelocity: horizontalVelocity,
+    projectileHeight: 0,
+    projectileVerticalVelocity: launch.vertical,
+    projectileStatus: "active",
+    fire: true,
+  }];
+}
 
-export const runPlayerTick = mutation({
-  args: {
-    roomCode: v.string(),
-    commanderId: v.id("commanderProfiles"),
-    commands: v.array(v.string()),
-    observedEvents: v.optional(v.array(observedEvent)),
-  },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    const now = Date.now();
-    const roomCode = normalizeRoom(args.roomCode);
-    const match = await ctx.db
-      .query("matches")
-      .withIndex("by_room_code", (q) => q.eq("roomCode", roomCode))
-      .unique();
-
-    if (!match || match.status === "finished") {
-      return null;
-    }
-
-    const commander = await requireCommanderProfile(ctx, args.commanderId);
-    const player = await findCommanderPlayer(ctx, match._id, commander.commanderId);
-    if (!player) {
-      throw new Error("Join the room before advancing battle");
-    }
-
-    const tank = await findPlayerTank(ctx, match._id, player._id);
-    if (!tank) {
-      throw new Error("Tank not found");
-    }
-
-    if (args.commands.length > 0) {
-      await queuePlayerCommands(ctx, match, player, tank, args.commands, now);
-    }
-
-    await advanceSinglePlayerTick(ctx, match, player, args.observedEvents ?? [], now);
-    return null;
-  },
-});
-
-export const runNextTick = mutation({
-  args: {
-    roomCode: v.string(),
-    agentKey: v.optional(v.string()),
-  },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    const userId = await getAuthUserId(ctx);
-    const agentKeyHash = args.agentKey ? await sha256(args.agentKey) : null;
-    if (!userId && !agentKeyHash) {
-      throw new Error("Sign in before advancing battle");
-    }
-
-    const now = Date.now();
-    const roomCode = normalizeRoom(args.roomCode);
-    const match = await ctx.db
-      .query("matches")
-      .withIndex("by_room_code", (q) => q.eq("roomCode", roomCode))
-      .unique();
-
-    if (!match || match.status === "finished") {
-      return null;
-    }
-
-    let player = null;
-    if (agentKeyHash) {
-      player = await ctx.db
-        .query("players")
-        .withIndex("by_match_and_agent_key", (q) => q.eq("matchId", match._id).eq("agentKeyHash", agentKeyHash))
-        .unique();
-    } else if (userId) {
-      player = await ctx.db
-        .query("players")
-        .withIndex("by_match_and_user", (q) => q.eq("matchId", match._id).eq("userId", userId))
-        .first();
-    }
-    if (!player) {
-      return null;
-    }
-
-    await advanceSinglePlayerTick(ctx, match, player, [], now);
-    return null;
-  },
-});
+function cleanPosition(position: { x: number; y: number }) {
+  return {
+    x: clampFinite(position.x, UNITS_PER_SQUARE, (BOARD_SIZE - 1) * UNITS_PER_SQUARE, spawnPoint(0).x),
+    y: clampFinite(position.y, UNITS_PER_SQUARE, (BOARD_SIZE - 1) * UNITS_PER_SQUARE, spawnPoint(0).y),
+  };
+}
 
 async function queuePlayerCommands(ctx: any, match: any, player: any, tank: any, rawCommands: string[], now: number) {
   const commandsByQueue = emptyCommandQueues();

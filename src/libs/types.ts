@@ -74,6 +74,7 @@ export type WorldEventRecord = {
   matchId: string;
   sourcePlayerId: string;
   sourceTankId: string;
+  clientEventId?: string;
   targetTankId?: string;
   projectileId?: string;
   type: "explosion" | "tankCollision";
@@ -105,7 +106,37 @@ export type PlayerCommandRecord = {
   clientCommandId?: string;
   queueType?: "move" | "bearing" | "cannon";
   commands: string[];
-  status?: "queued" | "complete";
+  status?: "queued" | "ready" | "running" | "complete";
   completedAt?: number;
+  createdAt: number;
+};
+
+export type CommandTimelinePointRecord = {
+  at: number;
+  position?: VectorRecord;
+  velocity?: VectorRecord;
+  height?: number;
+  hullDirection?: number;
+  turretDirection?: number;
+  launchAngle?: number;
+  cannonPower?: number;
+  fire?: boolean;
+  projectilePosition?: VectorRecord;
+  projectileVelocity?: VectorRecord;
+  projectileHeight?: number;
+  projectileVerticalVelocity?: number;
+  projectileStatus?: "active" | "exploding";
+};
+
+export type CommandTimelineRecord = {
+  _id: string;
+  matchId: string;
+  playerId: string;
+  tankId: string;
+  queueType: "move" | "bearing" | "cannon";
+  command: string;
+  startedAt: number;
+  endedAt: number;
+  points: CommandTimelinePointRecord[];
   createdAt: number;
 };

@@ -86,21 +86,6 @@ export const tools: McpToolRegistration[] = [
       openWorldHint: false,
     },
   }),
-  defineMcpMutation({
-    name: "battle_advance_tick",
-    description: "Advance the battle simulation by one server tick using the AI's secret agentKey. Useful when an AI-created battle has no browser client driving the clock.",
-    fn: api.game.runNextTick,
-    args: {
-      roomCode: v.string(),
-      agentKey: v.optional(v.string()),
-    },
-    metadata: SECRET_AGENT_KEY,
-    annotations: {
-      destructiveHint: false,
-      idempotentHint: false,
-      openWorldHint: false,
-    },
-  }),
   defineMcpQuery({
     name: "battle_observe",
     description: "Observe the battle state without revealing any queued commands. With agentKey, includes own elevation, cannon power, and remaining move distance.",

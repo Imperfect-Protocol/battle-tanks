@@ -131,7 +131,7 @@ export function BattlePage() {
       throw new Error("Incorrect command");
     }
 
-    queueCommands(orders.commands);
+    await queueCommands(orders.commands);
     return describeCommand(command);
   };
 
