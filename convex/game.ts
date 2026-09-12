@@ -569,7 +569,7 @@ export const sendCommands = mutation({
   },
 });
 
-async function planCommandTimelines(ctx: any, match: any, player: any, tank: any, tanks: any[], commands: string[], now: number) {
+export async function planCommandTimelines(ctx: any, match: any, player: any, tank: any, tanks: any[], commands: string[], now: number) {
   const byQueue = emptyCommandQueues();
   for (const command of commands) {
     const parsed = parseStoredCommand(command);
@@ -585,6 +585,7 @@ async function planCommandTimelines(ctx: any, match: any, player: any, tank: any
     .order("desc")
     .take(24);
   const plannedTimelines: any[] = [];
+  const insertedTimelines: any[] = [];
   const state: any = {
     position: cleanPosition(tank.position),
     baseHullDirection: angleFromDirection(tank.hullDirection),
@@ -609,7 +610,7 @@ async function planCommandTimelines(ctx: any, match: any, player: any, tank: any
         ...recentBearingTimelines,
         ...plannedTimelines.filter((planned) => planned.queueType === "bearing"),
       ]);
-      await ctx.db.insert("commandTimelines", {
+      const timelineId = await ctx.db.insert("commandTimelines", {
         matchId: match._id,
         playerId: player._id,
         tankId: tank._id,
@@ -621,6 +622,16 @@ async function planCommandTimelines(ctx: any, match: any, player: any, tank: any
         createdAt: now,
       });
       plannedTimelines.push({ ...timeline, queueType, command, createdAt: now });
+      insertedTimelines.push({
+        _id: timelineId,
+        playerId: player._id,
+        tankId: tank._id,
+        queueType,
+        command,
+        startedAt: timeline.startedAt,
+        endedAt: timeline.endedAt,
+        points: timeline.points,
+      });
       cursorAt = timeline.endedAt;
     }
   }
@@ -657,6 +668,7 @@ async function planCommandTimelines(ctx: any, match: any, player: any, tank: any
   });
   await ctx.db.patch(match._id, { updatedAt: now });
   await finalizeMatchIfNeeded(ctx, match, now);
+  return insertedTimelines;
 }
 
 async function nextTimelineStart(ctx: any, playerId: any, queueType: OrderQueueType, now: number) {

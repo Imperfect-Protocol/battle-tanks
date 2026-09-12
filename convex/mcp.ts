@@ -72,7 +72,7 @@ export const tools: McpToolRegistration[] = [
   }),
   defineMcpMutation({
     name: "battle_issue_commands",
-    description: "Queue or extend tank commands for the AI's own tank. Commands support semicolon-separated input: bear/b <00-36>, move/m <-10..10> squares, aim/a <00-36> to hold absolute turret aim, elev/e, pow/p, fire/f, ret/r to return turret to hull bearing.",
+    description: "Queue tank commands for the AI's own tank and return the generated timeline point arrays. Commands support semicolon-separated input: bear/b <00-36>, move/m <-10..10> squares, aim/a <00-36>, elev/e, pow/p, fire/f, ret/r.",
     fn: api.mcpGame.issueCommands,
     args: {
       roomCode: v.string(),
@@ -88,7 +88,7 @@ export const tools: McpToolRegistration[] = [
   }),
   defineMcpQuery({
     name: "battle_observe",
-    description: "Observe the battle state without revealing any queued commands. With agentKey, includes own elevation, cannon power, and remaining move distance.",
+    description: "Observe the battle state and recent command timeline point arrays. With agentKey, includes own elevation, cannon power, and remaining move distance.",
     fn: api.mcpGame.observeBattle,
     args: {
       roomCode: v.string(),
