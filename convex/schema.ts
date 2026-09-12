@@ -132,6 +132,56 @@ export default defineSchema({
     .index("by_match", ["matchId"])
     .index("by_player", ["playerId"]),
 
+  playerCommands: defineTable({
+    matchId: v.id("matches"),
+    playerId: v.id("players"),
+    commanderId: v.optional(v.id("commanderProfiles")),
+    clientCommandId: v.optional(v.string()),
+    queueType: v.optional(v.union(v.literal("move"), v.literal("bearing"), v.literal("cannon"))),
+    commands: v.array(v.string()),
+    status: v.optional(v.union(v.literal("queued"), v.literal("ready"), v.literal("running"), v.literal("complete"))),
+    completedAt: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index("by_match_and_created_at", ["matchId", "createdAt"])
+    .index("by_match_status_and_created_at", ["matchId", "status", "createdAt"])
+    .index("by_player_and_client_command_id", ["playerId", "clientCommandId"])
+    .index("by_player_and_created_at", ["playerId", "createdAt"]),
+
+  commandTimelines: defineTable({
+    matchId: v.id("matches"),
+    playerId: v.id("players"),
+    tankId: v.id("tanks"),
+    queueType: v.union(v.literal("move"), v.literal("bearing"), v.literal("cannon")),
+    command: v.string(),
+    startedAt: v.number(),
+    endedAt: v.number(),
+    points: v.array(v.object({
+      at: v.number(),
+      position: v.optional(vector),
+      velocity: v.optional(vector),
+      height: v.optional(v.number()),
+      hullDirection: v.optional(v.number()),
+      turretDirection: v.optional(v.number()),
+      launchAngle: v.optional(v.number()),
+      cannonPower: v.optional(v.number()),
+      fire: v.optional(v.boolean()),
+      projectilePosition: v.optional(vector),
+      projectileVelocity: v.optional(vector),
+      projectileHeight: v.optional(v.number()),
+      projectileVerticalVelocity: v.optional(v.number()),
+      projectileStatus: v.optional(v.union(v.literal("active"), v.literal("exploding"))),
+      targetTankId: v.optional(v.id("tanks")),
+      damage: v.optional(v.number()),
+      targetHealthBefore: v.optional(v.number()),
+      targetHealthAfter: v.optional(v.number()),
+    })),
+    createdAt: v.number(),
+  })
+    .index("by_match_and_started_at", ["matchId", "startedAt"])
+    .index("by_match_and_ended_at", ["matchId", "endedAt"])
+    .index("by_player_queue_and_ended_at", ["playerId", "queueType", "endedAt"]),
+
   projectiles: defineTable({
     matchId: v.id("matches"),
     ownerPlayerId: v.optional(v.id("players")),
@@ -174,6 +224,7 @@ export default defineSchema({
     matchId: v.id("matches"),
     sourcePlayerId: v.id("players"),
     sourceTankId: v.id("tanks"),
+    clientEventId: v.optional(v.string()),
     targetTankId: v.optional(v.id("tanks")),
     projectileId: v.optional(v.id("projectiles")),
     type: v.union(v.literal("explosion"), v.literal("tankCollision")),
@@ -188,6 +239,7 @@ export default defineSchema({
   })
     .index("by_match_and_expires_at", ["matchId", "expiresAt"])
     .index("by_source_player_and_expires_at", ["sourcePlayerId", "expiresAt"])
+    .index("by_source_player_and_client_event_id", ["sourcePlayerId", "clientEventId"])
     .index("by_projectile", ["projectileId"]),
 
   worldEventApplications: defineTable({

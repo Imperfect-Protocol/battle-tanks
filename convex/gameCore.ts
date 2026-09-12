@@ -396,9 +396,11 @@ function parseInputCommand(command: string): StoredCommand | null {
   }
 
   if (parsed.action === "bear" || parsed.action === "aim") {
-    const [, rawAmount] = command.trim().toLowerCase().replace(/\s+/g, " ").split(" ");
-    const bearing = strictHeading(rawAmount);
-    return bearing === null ? null : { action: parsed.action, bearing: roundForStorage(bearing) };
+    const [rawAction, rawAmount] = command.trim().toLowerCase().replace(/\s+/g, " ").split(" ");
+    if (rawAction === "b" || rawAction === "a") {
+      const bearing = strictHeading(rawAmount);
+      return bearing === null ? null : { action: parsed.action, bearing: roundForStorage(bearing) };
+    }
   }
 
   return parsed;

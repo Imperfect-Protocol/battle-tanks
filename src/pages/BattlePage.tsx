@@ -4,12 +4,11 @@ import { useCommander } from "../app/CommanderContext";
 import { BattleBoard } from "../components/BattleBoard";
 import { BattleConsole } from "../components/BattleConsole";
 import { NavigationRose } from "../components/NavigationRose";
+import { useBattleSimulation } from "../hooks/useBattleSimulation";
 import { useGameRoom } from "../hooks/useGameRoom";
 import { allowTabCloseWithoutPrompt, closeCurrentTab } from "../libs/browserTab";
-import type { GameRoom } from "../libs/GameRoom";
-import type { Tank } from "../libs/Tank";
+import { Orders } from "../libs/Orders";
 
-const GAME_TICK_MS = 500;
 const GAME_OVER_DELAY_MS = 3000;
 const STANDBY_AFTER_MS = 2 * 60 * 1000;
 const HELP_TEXT = "COMMANDS: bear/b <00-36>, move/m <-10..10> squares, aim/a <00-36>, elev/e <10-60>, pow/p <10-100>, fire/f, ret/r";
@@ -25,31 +24,11 @@ export function BattlePage() {
   const [battleName, setBattleName] = useState("");
   const [battleNameError, setBattleNameError] = useState("");
   const joinAttemptedRef = useRef(false);
-  const tickInFlightRef = useRef<Promise<unknown> | null>(null);
-  const { gameRoom, createRoom, joinRoom, submitScript, tickPlayer } = useGameRoom(cleanRoomCode, commanderId ?? undefined);
+  const { gameRoom: serverRoom, createRoom, joinRoom } = useGameRoom(cleanRoomCode);
+  const { gameRoom, queueCommands } = useBattleSimulation(serverRoom, cleanRoomCode, commanderId);
   const tankByPlayer = useMemo(() => new Map(gameRoom?.tanks.map((tank) => [tank.playerId, tank]) ?? []), [gameRoom]);
   const localPlayer = gameRoom?.players.find((player) => player.commanderId === commanderId);
   const localTank = localPlayer ? tankByPlayer.get(localPlayer.id) : null;
-  const observedEvents = useMemo(
-    () =>
-      gameRoom?.events
-        .filter((event) => event.sourcePlayerId !== localPlayer?.id && event.expiresAt > Date.now())
-        .map((event) => ({
-          eventId: event._id,
-          sourcePlayerId: event.sourcePlayerId,
-          targetTankId: event.targetTankId,
-          type: event.type,
-          position: event.position,
-          normal: event.normal,
-          radius: event.radius,
-          damage: event.damage,
-          penetration: event.penetration,
-          expiresAt: event.expiresAt,
-        }))
-        .slice(0, 20) ?? [],
-    [gameRoom?.events, localPlayer?.id],
-  );
-  const ownsClock = Boolean(localPlayer);
   const roomExists = Boolean(gameRoom?.match);
   const hasJoinedRoom = Boolean(localPlayer);
   const isCreateRoute = isNewBattleRoute || searchParams.get("create") === "1";
@@ -65,27 +44,6 @@ export function BattlePage() {
   );
 
   useEffect(() => allowTabCloseWithoutPrompt(), []);
-
-  useEffect(() => {
-    if (!gameRoom?.match || !ownsClock || !commanderId || !shouldSendEmptyTick(gameRoom, localTank, observedEvents.length)) {
-      return;
-    }
-
-    const timer = window.setInterval(() => {
-      if (tickInFlightRef.current) {
-        return;
-      }
-      const tick = tickPlayer(commanderId, observedEvents);
-      tickInFlightRef.current = tick;
-      void tick.finally(() => {
-        if (tickInFlightRef.current === tick) {
-          tickInFlightRef.current = null;
-        }
-      });
-    }, GAME_TICK_MS);
-
-    return () => window.clearInterval(timer);
-  }, [commanderId, gameRoom, localTank, observedEvents, ownsClock, tickPlayer]);
 
   useEffect(() => {
     if (!gameRoom?.match || showGameOver) {
@@ -168,8 +126,12 @@ export function BattlePage() {
       throw new Error("Choose a commander before submitting orders");
     }
 
-    await tickInFlightRef.current;
-    await submitScript(commanderId, command, observedEvents);
+    const orders = Orders.parse(command);
+    if (orders.isEmpty || orders.hasInvalidCommands) {
+      throw new Error("Incorrect command");
+    }
+
+    await queueCommands(orders.commands);
     return describeCommand(command);
   };
 
@@ -215,7 +177,7 @@ export function BattlePage() {
 
       <section className="battle-workbench">
         <div className="board-stage">
-          <BattleBoard gameRoom={gameRoom} localPlayerId={localPlayer?.id ?? null} />
+          <BattleBoard gameRoom={gameRoom} localPlayerId={localPlayer?.id ?? null} interpolate={false} />
           {isCreateRoute && !roomExists && (
             <div className="battle-dialog">
               <form className="protocol-panel battle-dialog__panel" onSubmit={createBattle}>
@@ -288,28 +250,6 @@ function readBattleName(match: unknown) {
     return match.battleName;
   }
   return "Battle";
-}
-
-function shouldSendEmptyTick(gameRoom: GameRoom | null, localTank: Tank | null | undefined, observedEventCount: number) {
-  if (!gameRoom?.match || gameRoom.match.status === "finished") {
-    return false;
-  }
-
-  if (observedEventCount > 0 || gameRoom.ownPendingWork) {
-    return true;
-  }
-
-  if (!localTank || localTank.health <= 0) {
-    return false;
-  }
-
-  const remainingMove = Math.abs(localTank.record.moveRemaining ?? 0);
-  const speed = Math.hypot(localTank.velocity.x, localTank.velocity.y);
-  if (remainingMove > 0.5 || speed > 0.5) {
-    return true;
-  }
-
-  return gameRoom.projectiles.some((projectile) => projectile.record.ownerTankId === localTank.id);
 }
 
 function statusLabel(status: string | undefined, ready: boolean) {

@@ -16,13 +16,14 @@ const DEFAULT_SEGMENT_MS = 40;
 type BattleBoardProps = {
   gameRoom: GameRoom | null;
   localPlayerId?: string | null;
+  interpolate?: boolean;
 };
 
-export function BattleBoard({ gameRoom, localPlayerId = null }: BattleBoardProps) {
+export function BattleBoard({ gameRoom, localPlayerId = null, interpolate = true }: BattleBoardProps) {
   const boardSize = gameRoom?.board?.size ?? DEFAULT_BOARD_SIZE;
   const walls = useMemo(() => uniqueWalls(gameRoom?.board?.walls ?? defaultWalls(boardSize)), [gameRoom?.board, boardSize]);
   const [frameNow, setFrameNow] = useState(Date.now());
-  const visualState = useInterpolatedWorld(gameRoom);
+  const visualState = useInterpolatedWorld(gameRoom, interpolate);
   const localTank = gameRoom?.tanks.find((tank) => tank.playerId === localPlayerId && tank.alive);
   const rawAimImpact = localTank ? predictProjectileImpact(localTank, boardSize, visualState, frameNow, localTank.record.cannonPower ?? localTank.record.lastFirePower ?? 50) : null;
   const rawTargetMarkers = localTank && rawAimImpact
@@ -484,9 +485,13 @@ type InterpolationState = {
   lastRenderedAt: number;
 };
 
-function useInterpolatedWorld(gameRoom: GameRoom | null): InterpolatedWorld {
+function useInterpolatedWorld(gameRoom: GameRoom | null, enabled = true): InterpolatedWorld {
   const statesRef = useRef(new Map<string, InterpolationState>());
   const snapshots = useMemo(() => {
+    if (!enabled) {
+      return [];
+    }
+
     const tankSnapshots = gameRoom?.tanks.map((tank) => ({
       key: `tank:${tank.id}`,
       serverUpdatedAt: tank.record.updatedAt,
@@ -536,6 +541,11 @@ function useInterpolatedWorld(gameRoom: GameRoom | null): InterpolatedWorld {
   );
 
   useEffect(() => {
+    if (!enabled) {
+      statesRef.current.clear();
+      return;
+    }
+
     const localReceivedAt = Date.now();
     const activeKeys = new Set<string>();
 
@@ -549,10 +559,19 @@ function useInterpolatedWorld(gameRoom: GameRoom | null): InterpolatedWorld {
         statesRef.current.delete(key);
       }
     }
-  }, [snapshotSignature, snapshots]);
+  }, [enabled, snapshotSignature, snapshots]);
 
   return useMemo(() => ({
     tankPose: (tank: Tank, now: number) => {
+      if (!enabled) {
+        return {
+          x: tank.position.x,
+          y: tank.position.y,
+          bearing: angleFromDirection(tank.record.hullDirection),
+          aim: angleFromDirection(tank.record.turretDirection),
+        };
+      }
+
       const params = readInterpolatedParams(statesRef.current, `tank:${tank.id}`, now, tankFallbackParams(tank));
       return {
         x: params.x,
@@ -562,10 +581,24 @@ function useInterpolatedWorld(gameRoom: GameRoom | null): InterpolatedWorld {
       };
     },
     tankPosition: (tank: Tank, now: number) => {
+      if (!enabled) {
+        return { x: tank.position.x, y: tank.position.y };
+      }
+
       const params = readInterpolatedParams(statesRef.current, `tank:${tank.id}`, now, tankFallbackParams(tank));
       return { x: params.x, y: params.y };
     },
     projectilePosition: (projectile: Missile, now: number) => {
+      if (!enabled) {
+        return {
+          x: projectile.position.x,
+          y: projectile.position.y,
+          height: projectile.record.height ?? 0,
+          bearing: 0,
+          aim: 0,
+        };
+      }
+
       return readInterpolatedParams(statesRef.current, `projectile:${projectile.record._id}`, now, {
         x: projectile.position.x,
         y: projectile.position.y,
@@ -574,7 +607,7 @@ function useInterpolatedWorld(gameRoom: GameRoom | null): InterpolatedWorld {
         aim: 0,
       });
     },
-  }), []);
+  }), [enabled]);
 }
 
 function tankFallbackParams(tank: Tank): InterpolatedParams {

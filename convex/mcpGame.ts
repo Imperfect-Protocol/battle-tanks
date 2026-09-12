@@ -1,30 +1,22 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { planCommandTimelines } from "./game";
 import {
   BOARD_SIZE,
   DEFAULT_FIRE_ANGLE_DEGREES,
   DEFAULT_FIRE_POWER,
   DEFAULT_LOBBY_ID,
   MAX_HEALTH,
-  MAX_MOVE_DISTANCE_UNITS,
-  ORDER_QUEUE_TYPES,
   UNITS_PER_SQUARE,
   angleFromDirection,
   cleanBattleName,
-  clampFinite,
   clampInteger,
   commandHelp,
-  compressCommandQueues,
-  completeActiveOrdersForQueue,
   distanceToMoveCommandUnits,
-  emptyCommandQueues,
-  moveCommandUnitsToDistance,
   normalizeLobbyId,
   normalizeOrderCommand,
   normalizeRoom,
   normalizeTankSpec,
-  parseStoredCommand,
-  queueTypeForCommand,
   sha256,
   spawnPoint,
   tankSpecFromSeed,
@@ -61,6 +53,38 @@ const gameSummaryValidator = v.object({
   canJoin: v.boolean(),
   players: v.array(v.string()),
   updatedAt: v.number(),
+});
+
+const commandTimelinePointValidator = v.object({
+  at: v.number(),
+  position: v.optional(vectorValidator),
+  velocity: v.optional(vectorValidator),
+  height: v.optional(v.number()),
+  hullDirection: v.optional(v.number()),
+  turretDirection: v.optional(v.number()),
+  launchAngle: v.optional(v.number()),
+  cannonPower: v.optional(v.number()),
+  fire: v.optional(v.boolean()),
+  projectilePosition: v.optional(vectorValidator),
+  projectileVelocity: v.optional(vectorValidator),
+  projectileHeight: v.optional(v.number()),
+  projectileVerticalVelocity: v.optional(v.number()),
+  projectileStatus: v.optional(v.union(v.literal("active"), v.literal("exploding"))),
+  targetTankId: v.optional(v.id("tanks")),
+  damage: v.optional(v.number()),
+  targetHealthBefore: v.optional(v.number()),
+  targetHealthAfter: v.optional(v.number()),
+});
+
+const commandTimelineValidator = v.object({
+  id: v.string(),
+  playerName: v.string(),
+  isOwnTimeline: v.boolean(),
+  queueType: v.union(v.literal("move"), v.literal("bearing"), v.literal("cannon")),
+  command: v.string(),
+  startedAt: v.number(),
+  endedAt: v.number(),
+  points: v.array(commandTimelinePointValidator),
 });
 
 export const listLobbies = query({
@@ -249,6 +273,7 @@ export const issueCommands = mutation({
   },
   returns: v.object({
     accepted: v.array(v.string()),
+    timelines: v.array(commandTimelineValidator),
   }),
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -257,74 +282,36 @@ export const issueCommands = mutation({
       throw new Error("Battle already finished");
     }
 
-    const commandsByQueue = emptyCommandQueues();
+    const commands = [];
     for (const command of args.commands) {
       const normalizedCommands = normalizeOrderCommand(command);
       if (normalizedCommands.length === 0) {
         throw new Error("Incorrect command");
       }
       for (const normalizedCommand of normalizedCommands) {
-        const parsed = parseStoredCommand(normalizedCommand);
-        if (!parsed) {
-          throw new Error("Incorrect command");
-        }
-        commandsByQueue[queueTypeForCommand(parsed)].push(normalizedCommand);
+        commands.push(normalizedCommand);
       }
     }
 
-    const queuedCommands = compressCommandQueues(commandsByQueue);
-    const acceptedCommands = ORDER_QUEUE_TYPES.flatMap((queueType) => queuedCommands[queueType]);
-    const hadMoveCommands = queuedCommands.move.length > 0;
-    const activeMoveRemaining = clampFinite(tank.moveRemaining, -MAX_MOVE_DISTANCE_UNITS * 4, MAX_MOVE_DISTANCE_UNITS * 4, 0);
-    if (Math.abs(activeMoveRemaining) > 0.5 && hadMoveCommands) {
-      const extraDistance = queuedCommands.move.reduce((total, command) => {
-        const parsed = parseStoredCommand(command);
-        return parsed?.action === "move" ? total + moveCommandUnitsToDistance(parsed.units) : total;
-      }, 0);
-      await ctx.db.patch(tank._id, {
-        moveRemaining: activeMoveRemaining + extraDistance,
-        updatedAt: now,
-      });
-      queuedCommands.move = [];
-    }
+    const tanks = await ctx.db
+      .query("tanks")
+      .withIndex("by_match", (q) => q.eq("matchId", match._id))
+      .take(2);
+    const timelines = await planCommandTimelines(ctx, match, player, tank, tanks, commands, now);
 
-    if (hadMoveCommands || queuedCommands.bearing.length > 0 || queuedCommands.cannon.length > 0) {
-      const existingOrders = await ctx.db
-        .query("orders")
-        .withIndex("by_player", (q) => q.eq("playerId", player._id))
-        .take(50);
-
-      if (hadMoveCommands) {
-        await completeActiveOrdersForQueue(ctx, existingOrders, tank._id, "move", now);
-      }
-      if (queuedCommands.bearing.length > 0) {
-        await completeActiveOrdersForQueue(ctx, existingOrders, tank._id, "bearing", now);
-      }
-      if (queuedCommands.cannon.length > 0) {
-        await completeActiveOrdersForQueue(ctx, existingOrders, tank._id, "cannon", now);
-      }
-    }
-
-    for (const queueType of ORDER_QUEUE_TYPES) {
-      const commands = queuedCommands[queueType];
-      if (commands.length === 0) {
-        continue;
-      }
-
-      await ctx.db.insert("orders", {
-        matchId: match._id,
-        playerId: player._id,
-        tankId: tank._id,
-        queueType,
-        commands,
-        cursor: 0,
-        status: "queued",
-        createdAt: now,
-        updatedAt: now,
-      });
-    }
-
-    return { accepted: acceptedCommands };
+    return {
+      accepted: commands,
+      timelines: timelines.map((timeline: any) => ({
+        id: timeline._id,
+        playerName: player.name,
+        isOwnTimeline: true,
+        queueType: timeline.queueType,
+        command: timeline.command,
+        startedAt: timeline.startedAt,
+        endedAt: timeline.endedAt,
+        points: timeline.points,
+      })),
+    };
   },
 });
 
@@ -366,6 +353,7 @@ export const observeBattle = query({
         ownerPlayerName: v.string(),
         status: v.union(v.literal("active"), v.literal("exploding")),
       })),
+      commandTimelines: v.array(commandTimelineValidator),
       recentCollisions: v.array(v.object({
         type: v.union(v.literal("wall"), v.literal("tank")),
         tick: v.number(),
@@ -405,6 +393,11 @@ export const observeBattle = query({
       .withIndex("by_match_and_created_at", (q) => q.eq("matchId", match._id))
       .order("desc")
       .take(10);
+    const timelineRows = await ctx.db
+      .query("commandTimelines")
+      .withIndex("by_match_and_ended_at", (q) => q.eq("matchId", match._id))
+      .order("desc")
+      .take(24);
     const agentPlayer = args.agentKey ? await findAgentPlayer(ctx, match._id, args.agentKey) : null;
     if (args.agentKey && !agentPlayer) {
       throw new Error("Invalid agent key");
@@ -457,6 +450,18 @@ export const observeBattle = query({
               status: projectile.status === "exploding" ? "exploding" as const : "active" as const,
             };
           }),
+        commandTimelines: timelineRows
+          .sort((left, right) => left.startedAt - right.startedAt || left.createdAt - right.createdAt)
+          .map((timeline) => ({
+            id: timeline._id,
+            playerName: playerById.get(timeline.playerId)?.name ?? "Unknown",
+            isOwnTimeline: timeline.playerId === agentPlayer?._id,
+            queueType: timeline.queueType,
+            command: timeline.command,
+            startedAt: timeline.startedAt,
+            endedAt: timeline.endedAt,
+            points: timeline.points,
+          })),
         recentCollisions: recentCollisionRows.map((event) => {
           const tank = tankById.get(event.tankId);
           const tankPlayer = tank ? playerById.get(tank.playerId) : null;

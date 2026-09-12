@@ -211,5 +211,5 @@ If you added a passphrase to your SSH key, Git may ask for it each commit. To av
 
 ---
 
-**Documented on:** 2026-09-09  
+**Documented on:** 2026-09-09
 **Status:** Tested and working on GitHub Codespace
