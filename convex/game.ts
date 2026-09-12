@@ -579,8 +579,15 @@ async function planCommandTimelines(ctx: any, match: any, player: any, tank: any
     byQueue[queueTypeForCommand(parsed)].push(command);
   }
 
+  const recentBearingTimelines = await ctx.db
+    .query("commandTimelines")
+    .withIndex("by_player_queue_and_ended_at", (q: any) => q.eq("playerId", player._id).eq("queueType", "bearing"))
+    .order("desc")
+    .take(24);
+  const plannedTimelines: any[] = [];
   const state: any = {
     position: cleanPosition(tank.position),
+    baseHullDirection: angleFromDirection(tank.hullDirection),
     hullDirection: angleFromDirection(tank.hullDirection),
     turretDirection: angleFromDirection(tank.turretDirection),
     turretLocked: tank.turretLocked ?? true,
@@ -590,7 +597,7 @@ async function planCommandTimelines(ctx: any, match: any, player: any, tank: any
     targets: tanks.filter((candidate) => candidate._id !== tank._id && candidate.health > 0),
   };
 
-  for (const queueType of ORDER_QUEUE_TYPES) {
+  for (const queueType of ["bearing", "move", "cannon"] as OrderQueueType[]) {
     let cursorAt = await nextTimelineStart(ctx, player._id, queueType, now + TIMELINE_PLAYBACK_DELAY_MS);
     for (const command of byQueue[queueType]) {
       const parsed = parseStoredCommand(command);
@@ -598,7 +605,10 @@ async function planCommandTimelines(ctx: any, match: any, player: any, tank: any
         continue;
       }
 
-      const timeline = planTimeline(queueType, command, parsed, state, cursorAt);
+      const timeline = planTimeline(queueType, command, parsed, state, cursorAt, [
+        ...recentBearingTimelines,
+        ...plannedTimelines.filter((planned) => planned.queueType === "bearing"),
+      ]);
       await ctx.db.insert("commandTimelines", {
         matchId: match._id,
         playerId: player._id,
@@ -610,6 +620,7 @@ async function planCommandTimelines(ctx: any, match: any, player: any, tank: any
         points: timeline.points,
         createdAt: now,
       });
+      plannedTimelines.push({ ...timeline, queueType, command, createdAt: now });
       cursorAt = timeline.endedAt;
     }
   }
@@ -657,26 +668,20 @@ async function nextTimelineStart(ctx: any, playerId: any, queueType: OrderQueueT
   return Math.max(now, previous?.endedAt ?? now);
 }
 
-function planTimeline(queueType: OrderQueueType, command: string, parsed: ReturnType<typeof parseStoredCommand> & {}, state: any, startedAt: number) {
+function planTimeline(
+  queueType: OrderQueueType,
+  command: string,
+  parsed: ReturnType<typeof parseStoredCommand> & {},
+  state: any,
+  startedAt: number,
+  bearingTimelines: any[] = [],
+) {
   if (queueType === "move" && parsed.action === "move") {
     const distance = moveCommandUnitsToDistance(parsed.units);
     const durationMs = Math.max(160, Math.round((Math.abs(distance) / (2 * UNITS_PER_SQUARE)) * 1000));
-    const from = state.position;
-    const delta = vectorFromBearing(state.hullDirection, distance);
-    const to = {
-      x: clamp(from.x + delta.x, UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS, (BOARD_SIZE - 1) * UNITS_PER_SQUARE - TANK_COLLISION_RADIUS_UNITS),
-      y: clamp(from.y + delta.y, UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS, (BOARD_SIZE - 1) * UNITS_PER_SQUARE - TANK_COLLISION_RADIUS_UNITS),
-    };
-    const points = linearTimelinePoints(startedAt, durationMs, (progress) => ({
-      position: {
-        x: from.x + (to.x - from.x) * progress,
-        y: from.y + (to.y - from.y) * progress,
-      },
-      velocity: progress >= 1 ? { x: 0, y: 0 } : {
-        x: (to.x - from.x) / Math.max(1, durationMs / 40),
-        y: (to.y - from.y) / Math.max(1, durationMs / 40),
-      },
-    }));
+    const directionFallback = state.baseHullDirection ?? state.hullDirection;
+    const points = movementTimelinePoints(startedAt, durationMs, distance, state.position, bearingTimelines, directionFallback);
+    const to = points[points.length - 1]?.position ?? state.position;
     state.position = to;
     return { startedAt, endedAt: startedAt + durationMs, points };
   }
@@ -752,6 +757,111 @@ function linearTimelinePoints(startedAt: number, durationMs: number, pointAt: (p
   }
   points.push({ at: startedAt + durationMs, ...pointAt(1) });
   return points;
+}
+
+function movementTimelinePoints(
+  startedAt: number,
+  durationMs: number,
+  distance: number,
+  from: { x: number; y: number },
+  bearingTimelines: any[],
+  fallbackBearing: number,
+) {
+  const points = [];
+  const stepMs = 40;
+  const signedUnitsPerMs = distance / Math.max(1, durationMs);
+  let position = cleanPosition(from);
+
+  for (let elapsed = 0; elapsed < durationMs; elapsed += stepMs) {
+    const at = startedAt + elapsed;
+    if (elapsed > 0) {
+      const previousAt = Math.max(startedAt, at - stepMs);
+      const bearing = sampleBearingAt(bearingTimelines, previousAt + (at - previousAt) / 2, fallbackBearing);
+      const delta = vectorFromBearing(bearing, signedUnitsPerMs * (at - previousAt));
+      position = clampTankPosition({
+        x: position.x + delta.x,
+        y: position.y + delta.y,
+      });
+    }
+
+    points.push({
+      at,
+      position,
+      velocity: vectorFromBearing(sampleBearingAt(bearingTimelines, at, fallbackBearing), signedUnitsPerMs * stepMs),
+    });
+  }
+
+  const lastAt = points[points.length - 1]?.at ?? startedAt;
+  if (lastAt < startedAt + durationMs) {
+    const bearing = sampleBearingAt(bearingTimelines, lastAt + (startedAt + durationMs - lastAt) / 2, fallbackBearing);
+    const delta = vectorFromBearing(bearing, signedUnitsPerMs * (startedAt + durationMs - lastAt));
+    position = clampTankPosition({
+      x: position.x + delta.x,
+      y: position.y + delta.y,
+    });
+  }
+
+  points.push({
+    at: startedAt + durationMs,
+    position,
+    velocity: { x: 0, y: 0 },
+  });
+  return points;
+}
+
+function sampleBearingAt(timelines: any[], at: number, fallbackBearing: number) {
+  let bearing = normalizeDegrees(fallbackBearing);
+  let hasPastBearing = false;
+  const ordered = [...timelines].sort((left, right) => left.startedAt - right.startedAt || left.createdAt - right.createdAt);
+
+  for (const timeline of ordered) {
+    const points = timeline.points ?? [];
+    if (timeline.queueType !== "bearing" || points.length === 0) {
+      continue;
+    }
+
+    const firstBearing = points[0].hullDirection;
+    const lastBearing = points[points.length - 1].hullDirection;
+    if (at < timeline.startedAt) {
+      return hasPastBearing || firstBearing === undefined ? bearing : normalizeDegrees(firstBearing);
+    }
+    if (at >= timeline.endedAt) {
+      if (lastBearing !== undefined) {
+        bearing = normalizeDegrees(lastBearing);
+        hasPastBearing = true;
+      }
+      continue;
+    }
+    if (firstBearing !== undefined && at <= points[0].at) {
+      return normalizeDegrees(firstBearing);
+    }
+
+    for (let index = 1; index < points.length; index += 1) {
+      const previous = points[index - 1];
+      const next = points[index];
+      if (at > next.at) {
+        continue;
+      }
+      if (previous.hullDirection === undefined || next.hullDirection === undefined) {
+        return bearing;
+      }
+      const progress = (at - previous.at) / Math.max(1, next.at - previous.at);
+      return normalizeDegrees(previous.hullDirection + shortestAngleDelta(previous.hullDirection, next.hullDirection) * progress);
+    }
+
+    if (lastBearing !== undefined) {
+      return normalizeDegrees(lastBearing);
+    }
+  }
+
+  return bearing;
+}
+
+function clampTankPosition(position: { x: number; y: number }) {
+  return {
+    x: clamp(position.x, UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS, (BOARD_SIZE - 1) * UNITS_PER_SQUARE - TANK_COLLISION_RADIUS_UNITS),
+    y: clamp(position.y, UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS, (BOARD_SIZE - 1) * UNITS_PER_SQUARE - TANK_COLLISION_RADIUS_UNITS),
+  };
 }
 
 function projectileTimelinePoints(state: any, startedAt: number) {
