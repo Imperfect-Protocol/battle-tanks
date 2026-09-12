@@ -126,6 +126,10 @@ export type CommandTimelinePointRecord = {
   projectileHeight?: number;
   projectileVerticalVelocity?: number;
   projectileStatus?: "active" | "exploding";
+  targetTankId?: string;
+  damage?: number;
+  targetHealthBefore?: number;
+  targetHealthAfter?: number;
 };
 
 export type CommandTimelineRecord = {

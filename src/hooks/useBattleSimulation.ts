@@ -8,6 +8,7 @@ import type { CommandTimelinePointRecord, ProjectileRecord, TankRecord } from ".
 const FRAME_MS = 40;
 const EMA_WEIGHT = 0.1;
 const LOCAL_PLAYBACK_DELAY_MS = 80;
+const PROJECTILE_IMPACT_VISUAL_MS = 300;
 
 type RenderedTank = {
   position: { x: number; y: number };
@@ -127,18 +128,22 @@ function playTimelines(room: GameRoom, now: number, renderedTanks: Map<string, R
   const timelines = [...room.commandTimelines].sort((left, right) => left.startedAt - right.startedAt || left.createdAt - right.createdAt);
   const tanks = room.tanks.map((tank) => {
     const target = { ...tank.record, position: { ...tank.record.position }, velocity: { ...tank.record.velocity } };
+    const delayedHealth = delayedHealthForTank(tank.id, room, now, clocks);
+    if (delayedHealth !== undefined) {
+      target.health = delayedHealth;
+    }
     const tankTimelines = timelines.filter((timeline) => timeline.tankId === tank.id);
 
     for (const queueType of ["move", "bearing", "cannon"] as const) {
       const active = tankTimelines.find((timeline) => {
         const clock = clocks.get(timeline._id);
-        return timeline.queueType === queueType && clock && clock.localStartedAt <= now && clock.localEndedAt >= now;
+        return timeline.queueType === queueType && clock && now <= clock.localEndedAt;
       });
       if (!active) {
         continue;
       }
       const clock = clocks.get(active._id);
-      const serverNow = clock ? active.startedAt + (now - clock.localStartedAt) : now;
+      const serverNow = clock ? active.startedAt + Math.max(0, now - clock.localStartedAt) : now;
       applyPoint(target, pointAt(active.points, serverNow));
     }
 
@@ -163,6 +168,24 @@ function playTimelines(room: GameRoom, now: number, renderedTanks: Map<string, R
   );
 }
 
+function delayedHealthForTank(tankId: string, room: GameRoom, now: number, clocks: Map<string, LocalTimelineClock>) {
+  let health: number | undefined;
+  for (const timeline of [...room.commandTimelines].sort((left, right) => left.startedAt - right.startedAt || left.createdAt - right.createdAt)) {
+    if (timeline.queueType !== "cannon" || timeline.command !== "fire") {
+      continue;
+    }
+
+    const impact = [...timeline.points].reverse().find((point) => point.targetTankId === tankId && point.targetHealthBefore !== undefined && point.targetHealthAfter !== undefined);
+    const clock = clocks.get(timeline._id);
+    if (!impact || !clock) {
+      continue;
+    }
+
+    health = now < clock.localEndedAt + PROJECTILE_IMPACT_VISUAL_MS ? impact.targetHealthBefore : impact.targetHealthAfter;
+  }
+  return health;
+}
+
 function projectileRecordsFromTimelines(room: GameRoom, now: number, clocks: Map<string, LocalTimelineClock>): ProjectileRecord[] {
   const projectiles: ProjectileRecord[] = [];
   for (const timeline of room.commandTimelines) {
@@ -171,7 +194,7 @@ function projectileRecordsFromTimelines(room: GameRoom, now: number, clocks: Map
     }
 
     const clock = clocks.get(timeline._id);
-    if (!clock || now < clock.localStartedAt || now > clock.localEndedAt + 300) {
+    if (!clock || now < clock.localStartedAt || now > clock.localEndedAt + PROJECTILE_IMPACT_VISUAL_MS) {
       continue;
     }
 
@@ -191,7 +214,7 @@ function projectileRecordsFromTimelines(room: GameRoom, now: number, clocks: Map
       height: point.projectileHeight ?? 0,
       verticalVelocity: point.projectileVerticalVelocity ?? 0,
       status: point.projectileStatus ?? "active",
-      explosionEndsAt: point.projectileStatus === "exploding" ? now + 260 : undefined,
+      explosionEndsAt: point.projectileStatus === "exploding" ? now + PROJECTILE_IMPACT_VISUAL_MS : undefined,
       updatedAt: now,
     });
   }

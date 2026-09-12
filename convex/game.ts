@@ -558,13 +558,18 @@ export const sendCommands = mutation({
       return null;
     }
 
-    await planCommandTimelines(ctx, match, player, tank, commands, now);
+    const tanks = await ctx.db
+      .query("tanks")
+      .withIndex("by_match", (q) => q.eq("matchId", match._id))
+      .take(2);
+
+    await planCommandTimelines(ctx, match, player, tank, tanks, commands, now);
 
     return null;
   },
 });
 
-async function planCommandTimelines(ctx: any, match: any, player: any, tank: any, commands: string[], now: number) {
+async function planCommandTimelines(ctx: any, match: any, player: any, tank: any, tanks: any[], commands: string[], now: number) {
   const byQueue = emptyCommandQueues();
   for (const command of commands) {
     const parsed = parseStoredCommand(command);
@@ -574,7 +579,7 @@ async function planCommandTimelines(ctx: any, match: any, player: any, tank: any
     byQueue[queueTypeForCommand(parsed)].push(command);
   }
 
-  const state = {
+  const state: any = {
     position: cleanPosition(tank.position),
     hullDirection: angleFromDirection(tank.hullDirection),
     turretDirection: angleFromDirection(tank.turretDirection),
@@ -582,6 +587,7 @@ async function planCommandTimelines(ctx: any, match: any, player: any, tank: any
     launchAngle: clampFinite(tank.launchAngle, MIN_AIM_ELEVATION_DEGREES, MAX_AIM_ELEVATION_DEGREES, DEFAULT_FIRE_ANGLE_DEGREES),
     cannonPower: clampFinite(tank.cannonPower ?? tank.lastFirePower, MIN_FIRE_POWER, MAX_FIRE_POWER, DEFAULT_FIRE_POWER),
     tankSpec: normalizeTankSpec(tank.tankSpec),
+    targets: tanks.filter((candidate) => candidate._id !== tank._id && candidate.health > 0),
   };
 
   for (const queueType of ORDER_QUEUE_TYPES) {
@@ -608,6 +614,22 @@ async function planCommandTimelines(ctx: any, match: any, player: any, tank: any
     }
   }
 
+  for (const hit of state.hits ?? []) {
+    await ctx.db.patch(hit.targetTankId, {
+      health: hit.targetHealthAfter,
+      updatedAt: now,
+    });
+    if (hit.targetHealthAfter <= 0) {
+      const targetTank = await ctx.db.get(hit.targetTankId);
+      if (targetTank) {
+        const targetPlayer = await ctx.db.get(targetTank.playerId);
+        if (targetPlayer && !targetPlayer.finishedAt) {
+          await ctx.db.patch(targetPlayer._id, { finishedAt: now });
+        }
+      }
+    }
+  }
+
   await ctx.db.patch(tank._id, {
     position: state.position,
     velocity: { x: 0, y: 0 },
@@ -623,6 +645,7 @@ async function planCommandTimelines(ctx: any, match: any, player: any, tank: any
     updatedAt: now,
   });
   await ctx.db.patch(match._id, { updatedAt: now });
+  await finalizeMatchIfNeeded(ctx, match, now);
 }
 
 async function nextTimelineStart(ctx: any, playerId: any, queueType: OrderQueueType, now: number) {
@@ -679,6 +702,18 @@ function planTimeline(queueType: OrderQueueType, command: string, parsed: Return
 
   if (queueType === "cannon" && parsed.action === "fire") {
     const points = projectileTimelinePoints(state, startedAt);
+    const lastPoint: any = points[points.length - 1];
+    const hit = lastPoint?.projectilePosition ? projectileHit(state, lastPoint.projectilePosition) : null;
+    if (hit && lastPoint) {
+      lastPoint.targetTankId = hit.targetTankId;
+      lastPoint.damage = hit.damage;
+      lastPoint.targetHealthBefore = hit.targetHealthBefore;
+      lastPoint.targetHealthAfter = hit.targetHealthAfter;
+      state.hits = [...(state.hits ?? []), hit];
+      state.targets = state.targets.map((target: any) =>
+        target._id === hit.targetTankId ? { ...target, health: hit.targetHealthAfter } : target,
+      );
+    }
     return { startedAt, endedAt: points[points.length - 1]?.at ?? startedAt + 40, points };
   }
 
@@ -759,7 +794,7 @@ function projectileTimelinePoints(state: any, startedAt: number) {
       projectileVelocity: horizontalVelocity,
       projectileHeight: Math.max(0, nextHeight),
       projectileVerticalVelocity: nextVerticalVelocity,
-      projectileStatus: hitsWall || hitsGround ? "exploding" : "active",
+      projectileStatus: hitsWall || hitsGround ? "exploding" as const : "active" as const,
       fire: elapsed === 0,
     });
 
@@ -777,6 +812,30 @@ function projectileTimelinePoints(state: any, startedAt: number) {
     projectileStatus: "active",
     fire: true,
   }];
+}
+
+function projectileHit(state: any, position: { x: number; y: number }) {
+  let bestHit = null;
+  for (const target of state.targets ?? []) {
+    const distance = distanceBetween(position, target.position);
+    if (distance > PROJECTILE_HIT_RADIUS_UNITS) {
+      continue;
+    }
+
+    if (bestHit && distance >= bestHit.distance) {
+      continue;
+    }
+
+    const damage = damageForImpact(distance, MAX_PROJECTILE_DAMAGE);
+    bestHit = {
+      distance,
+      targetTankId: target._id,
+      damage,
+      targetHealthBefore: target.health,
+      targetHealthAfter: Math.max(0, target.health - damage),
+    };
+  }
+  return bestHit;
 }
 
 function cleanPosition(position: { x: number; y: number }) {

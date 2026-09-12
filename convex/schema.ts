@@ -171,6 +171,10 @@ export default defineSchema({
       projectileHeight: v.optional(v.number()),
       projectileVerticalVelocity: v.optional(v.number()),
       projectileStatus: v.optional(v.union(v.literal("active"), v.literal("exploding"))),
+      targetTankId: v.optional(v.id("tanks")),
+      damage: v.optional(v.number()),
+      targetHealthBefore: v.optional(v.number()),
+      targetHealthAfter: v.optional(v.number()),
     })),
     createdAt: v.number(),
   })
