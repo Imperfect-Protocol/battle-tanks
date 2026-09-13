@@ -212,7 +212,20 @@ export const getRoom = query({
       ...(finishedAt ? { finishedAt } : {}),
     };
 
-    return { match: viewMatch, board, players, tanks, orders: [], projectiles: [], events: visibleEvents, commandBatches, commandTimelines, ownPendingWork: false };
+    return {
+      match: viewMatch,
+      board,
+      players,
+      tanks,
+      orders: [],
+      projectiles: [],
+      events: visibleEvents,
+      commandBatches,
+      commandTimelines,
+      ownPendingWork: Boolean(
+        viewerPlayer && commandTimelines.some((timeline) => timeline.playerId === viewerPlayer._id && timeline.endedAt >= now),
+      ),
+    };
   },
 });
 

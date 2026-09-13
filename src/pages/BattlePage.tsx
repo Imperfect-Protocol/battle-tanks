@@ -241,6 +241,7 @@ export function BattlePage() {
               commanderId={commanderId}
               roomCode={cleanRoomCode}
               tank={localTank ?? null}
+              ownPendingWork={gameRoom.ownPendingWork}
               onCommand={submitCommand}
             />
             <NavigationRose tank={localTank} />

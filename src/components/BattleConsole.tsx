@@ -3,8 +3,10 @@ import { useAction, useMutation, useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import {
+  AiCommanderMission,
   AiCommandConsolePresenter,
   AiConsoleMetaCommandParser,
+  type AiAssistRequest,
   type AiAssistResult,
   type IntentFileSummary,
 } from "../libs/AiCommandConsole";
@@ -22,13 +24,14 @@ type BattleConsoleProps = {
   commanderId?: Id<"commanderProfiles"> | null;
   roomCode: string;
   tank: Tank | null;
+  ownPendingWork: boolean;
   onCommand: (command: string) => Promise<string | void>;
 };
 
 const aiConsolePresenter = new AiCommandConsolePresenter();
 const aiConsoleMetaCommandParser = new AiConsoleMetaCommandParser();
 
-export function BattleConsole({ commanderName, commanderId, roomCode, tank, onCommand }: BattleConsoleProps) {
+export function BattleConsole({ commanderName, commanderId, roomCode, tank, ownPendingWork, onCommand }: BattleConsoleProps) {
   const [input, setInput] = useState("");
   const [commandHistory, setCommandHistory] = useState<string[]>([]);
   const [historyCursor, setHistoryCursor] = useState<number | null>(null);
@@ -42,6 +45,7 @@ export function BattleConsole({ commanderName, commanderId, roomCode, tank, onCo
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const shouldAutoScrollRef = useRef(true);
+  const ownPendingWorkRef = useRef(ownPendingWork);
   const intentFiles = useQuery(
     api.aiCommander.listIntentFiles,
     commanderId ? { commanderId } : "skip",
@@ -51,6 +55,10 @@ export function BattleConsole({ commanderName, commanderId, roomCode, tank, onCo
   const selectedIntentFile =
     intentFiles?.find((file) => file.id === selectedIntentFileId) ?? intentFiles?.[0] ?? null;
   const prompt = aiConsolePresenter.formatPrompt(tank);
+
+  useEffect(() => {
+    ownPendingWorkRef.current = ownPendingWork;
+  }, [ownPendingWork]);
 
   useEffect(() => {
     if (!selectedIntentFileId && intentFiles?.[0]) {
@@ -122,35 +130,55 @@ export function BattleConsole({ commanderName, commanderId, roomCode, tank, onCo
     }
 
     setMessages((current) => [...current, { kind: "system", text: "AI thinking...", level: "info" }]);
-    const result = await (assist as (args: unknown) => Promise<AiAssistResult>)({
+    const request = {
       roomCode,
       commanderId,
       intentFileId: intentFile.id,
       intent,
       ...(sessionAiModel ? { model: sessionAiModel } : {}),
+    };
+    const mission = new AiCommanderMission(request, {
+      assist: (args: AiAssistRequest) => (assist as (request: AiAssistRequest) => Promise<AiAssistResult>)(args),
+      execute: async (commandLine: string) => {
+        await onCommand(commandLine);
+      },
+      waitForIdle,
+      log: logAiResult,
+      announce: (text: string) => setMessages((current) => [...current, { kind: "system", text, level: "info" }]),
     });
-    console.info("[Battle Tanks AI]", {
-      input: result.debugInput ?? {
-        intent,
-        model: sessionAiModel ?? "default",
-        intentFile: intentFile.filename,
-      },
-      output: {
-        provider: result.provider,
-        model: result.model,
-        configured: result.configured,
-        latencyMs: result.latencyMs,
-        commandLine: result.commandLine,
-        commands: result.commands,
-      },
+    await mission.run();
+    return "Accepted";
+  };
+
+  const logAiResult = (result: AiAssistResult) => {
+    console.debug("[Battle Tanks AI input]", result.debugInput ?? {
+      model: sessionAiModel ?? "default",
+    });
+    console.debug("[Battle Tanks AI prompt raw]", result.debugPrompt);
+    console.debug("[Battle Tanks AI reply raw]", result.debugReply);
+    console.debug("[Battle Tanks AI output]", {
+      provider: result.provider,
+      model: result.model,
+      configured: result.configured,
+      latencyMs: result.latencyMs,
+      commandLine: result.commandLine,
+      commands: result.commands,
+      tasks: result.tasks,
+      achieved: result.achieved,
+      stopReason: result.stopReason,
     });
     setMessages((current) => [
       ...current,
-      { kind: "system", text: `AI: ${result.commandLine}`, level: "info" },
       { kind: "system", text: aiConsolePresenter.formatMetrics(result), level: result.configured ? "info" : "error" },
     ]);
-    await onCommand(result.commandLine);
-    return "Accepted";
+  };
+
+  const waitForIdle = async () => {
+    await sleep(150);
+    const deadline = Date.now() + 12_000;
+    while (ownPendingWorkRef.current && Date.now() < deadline) {
+      await sleep(120);
+    }
   };
 
   const recallCommand = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -323,4 +351,8 @@ export function BattleConsole({ commanderName, commanderId, roomCode, tank, onCo
       </form>
     </section>
   );
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 }
