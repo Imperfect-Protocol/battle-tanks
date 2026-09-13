@@ -236,7 +236,14 @@ export function BattlePage() {
 
         {hasJoinedRoom && gameRoom?.ready && (
           <aside className="battle-control-stack">
-            <BattleConsole commanderName={displayName} roomCode={cleanRoomCode} onCommand={submitCommand} />
+            <BattleConsole
+              commanderName={displayName}
+              commanderId={commanderId}
+              roomCode={cleanRoomCode}
+              tank={localTank ?? null}
+              ownPendingWork={gameRoom.ownPendingWork}
+              onCommand={submitCommand}
+            />
             <NavigationRose tank={localTank} />
           </aside>
         )}

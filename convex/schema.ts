@@ -44,6 +44,18 @@ export default defineSchema({
     .index("by_commander", ["commanderId"])
     .index("by_wins", ["wins"]),
 
+  intentFiles: defineTable({
+    userId: v.id("users"),
+    commanderId: v.id("commanderProfiles"),
+    filename: v.string(),
+    content: v.string(),
+    size: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_user_and_updated_at", ["userId", "updatedAt"])
+    .index("by_commander_and_updated_at", ["commanderId", "updatedAt"]),
+
   boards: defineTable({
     code: v.string(),
     name: v.string(),
