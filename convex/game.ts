@@ -14,6 +14,7 @@ import {
   MIN_FIRE_POWER,
   MIN_AIM_ELEVATION_DEGREES,
   ORDER_QUEUE_TYPES,
+  TANK_COLLISION_CLEARANCE_UNITS,
   TANK_COLLISION_RADIUS_UNITS,
   TANK_LENGTH_UNITS,
   TANK_WIDTH_UNITS,
@@ -81,7 +82,8 @@ const tankSpecValidator = v.object({
 
 type CollisionDetails =
   | { type: "none"; position: { x: number; y: number } }
-  | { type: "wall"; position: { x: number; y: number }; normal: { x: number; y: number }; penetration: number };
+  | { type: "wall"; position: { x: number; y: number }; normal: { x: number; y: number }; penetration: number }
+  | { type: "tank"; position: { x: number; y: number }; normal: { x: number; y: number }; penetration: number; otherTankId: any; damageToOther: number; otherHealthAfter: number };
 
 const observedEvent = v.object({
   eventId: v.id("worldEvents"),
@@ -608,12 +610,21 @@ export async function planCommandTimelines(ctx: any, match: any, player: any, ta
     launchAngle: clampFinite(tank.launchAngle, MIN_AIM_ELEVATION_DEGREES, MAX_AIM_ELEVATION_DEGREES, DEFAULT_FIRE_ANGLE_DEGREES),
     cannonPower: clampFinite(tank.cannonPower ?? tank.lastFirePower, MIN_FIRE_POWER, MAX_FIRE_POWER, DEFAULT_FIRE_POWER),
     tankSpec: normalizeTankSpec(tank.tankSpec),
+    health: clampFinite(tank.health, 0, MAX_HEALTH, MAX_HEALTH),
+    board: {
+      size: BOARD_SIZE,
+      walls: arenaWalls(),
+    },
     targets: tanks.filter((candidate) => candidate._id !== tank._id && candidate.health > 0),
   };
 
   for (const queueType of ["bearing", "move", "cannon"] as OrderQueueType[]) {
     let cursorAt = await nextTimelineStart(ctx, player._id, queueType, now + TIMELINE_PLAYBACK_DELAY_MS);
     for (const command of byQueue[queueType]) {
+      if (state.health <= 0) {
+        break;
+      }
+
       const parsed = parseStoredCommand(command);
       if (!parsed) {
         continue;
@@ -665,6 +676,36 @@ export async function planCommandTimelines(ctx: any, match: any, player: any, ta
     }
   }
 
+  for (const collision of state.collisions ?? []) {
+    await ctx.db.insert("collisionEvents", {
+      matchId: match._id,
+      ownerPlayerId: player._id,
+      tankId: tank._id,
+      ...(collision.otherTankId ? { otherTankId: collision.otherTankId } : {}),
+      type: collision.type,
+      position: collision.position,
+      normal: collision.normal,
+      impactSpeed: collision.impactSpeed,
+      damageToTank: collision.damage,
+      ...(collision.damageToOther !== undefined ? { damageToOther: collision.damageToOther } : {}),
+      tick: match.currentTick,
+      createdAt: now,
+    });
+    if (collision.otherTankId) {
+      await ctx.db.patch(collision.otherTankId, {
+        health: collision.otherHealthAfter,
+        updatedAt: now,
+      });
+      if (collision.otherHealthAfter <= 0) {
+        const targetTank = await ctx.db.get(collision.otherTankId);
+        const targetPlayer = targetTank ? await ctx.db.get(targetTank.playerId) : null;
+        if (targetPlayer && !targetPlayer.finishedAt) {
+          await ctx.db.patch(targetPlayer._id, { finishedAt: now });
+        }
+      }
+    }
+  }
+
   await ctx.db.patch(tank._id, {
     position: state.position,
     velocity: { x: 0, y: 0 },
@@ -677,6 +718,7 @@ export async function planCommandTimelines(ctx: any, match: any, player: any, ta
     launchAngle: state.launchAngle,
     cannonPower: state.cannonPower,
     lastFirePower: state.cannonPower,
+    health: state.health,
     updatedAt: now,
   });
   await ctx.db.patch(match._id, { updatedAt: now });
@@ -705,10 +747,29 @@ function planTimeline(
     const distance = moveCommandUnitsToDistance(parsed.units);
     const durationMs = Math.max(160, Math.round((Math.abs(distance) / (2 * UNITS_PER_SQUARE)) * 1000));
     const directionFallback = state.baseHullDirection ?? state.hullDirection;
-    const points = movementTimelinePoints(startedAt, durationMs, distance, state.position, bearingTimelines, directionFallback);
+    const movement = new MovementTimelinePlanner(state.board).plan({
+      startedAt,
+      durationMs,
+      distance,
+      from: state.position,
+      bearingTimelines,
+      fallbackBearing: directionFallback,
+      health: state.health,
+      targets: state.targets,
+    });
+    const points = movement.points;
     const to = points[points.length - 1]?.position ?? state.position;
     state.position = to;
-    return { startedAt, endedAt: startedAt + durationMs, points };
+    if (movement.collision) {
+      state.health = movement.collision.healthAfter;
+      state.collisions = [...(state.collisions ?? []), movement.collision];
+      if (movement.collision.otherTankId) {
+        state.targets = state.targets.map((target: any) =>
+          target._id === movement.collision?.otherTankId ? { ...target, health: movement.collision.otherHealthAfter } : target,
+        );
+      }
+    }
+    return { startedAt, endedAt: points[points.length - 1]?.at ?? startedAt + durationMs, points };
   }
 
   if (queueType === "bearing" && parsed.action === "bear") {
@@ -784,54 +845,125 @@ function linearTimelinePoints(startedAt: number, durationMs: number, pointAt: (p
   return points;
 }
 
-function movementTimelinePoints(
-  startedAt: number,
-  durationMs: number,
-  distance: number,
-  from: { x: number; y: number },
-  bearingTimelines: any[],
-  fallbackBearing: number,
-) {
-  const points = [];
-  const stepMs = 40;
-  const signedUnitsPerMs = distance / Math.max(1, durationMs);
-  let position = cleanPosition(from);
+class MovementTimelinePlanner {
+  constructor(private readonly board: { size: number; walls: { x: number; y: number }[] }) {}
 
-  for (let elapsed = 0; elapsed < durationMs; elapsed += stepMs) {
-    const at = startedAt + elapsed;
-    if (elapsed > 0) {
-      const previousAt = Math.max(startedAt, at - stepMs);
-      const bearing = sampleBearingAt(bearingTimelines, previousAt + (at - previousAt) / 2, fallbackBearing);
-      const delta = vectorFromBearing(bearing, signedUnitsPerMs * (at - previousAt));
-      position = clampTankPosition({
+  plan(args: {
+    startedAt: number;
+    durationMs: number;
+    distance: number;
+    from: { x: number; y: number };
+    bearingTimelines: any[];
+    fallbackBearing: number;
+    health: number;
+    targets: any[];
+  }) {
+    const points = [];
+    const stepMs = 40;
+    const signedUnitsPerMs = args.distance / Math.max(1, args.durationMs);
+    let position = clampPosition(cleanPosition(args.from), this.board.size);
+
+    points.push({
+      at: args.startedAt,
+      position,
+      velocity: vectorFromBearing(sampleBearingAt(args.bearingTimelines, args.startedAt, args.fallbackBearing), signedUnitsPerMs * stepMs),
+    });
+
+    for (let elapsed = stepMs; elapsed <= args.durationMs; elapsed += stepMs) {
+      const at = Math.min(args.startedAt + elapsed, args.startedAt + args.durationMs);
+      const previousAt = points[points.length - 1]?.at ?? args.startedAt;
+      const deltaMs = Math.max(1, at - previousAt);
+      const bearing = sampleBearingAt(args.bearingTimelines, previousAt + deltaMs / 2, args.fallbackBearing);
+      const velocity = vectorFromBearing(bearing, signedUnitsPerMs * stepMs);
+      const delta = vectorFromBearing(bearing, signedUnitsPerMs * deltaMs);
+      const desiredPosition = {
         x: position.x + delta.x,
         y: position.y + delta.y,
+      };
+      const move = resolveTankMove(desiredPosition, this.board, velocity);
+      const tankCollision = move.type === "none" ? this.resolveTankCollision(move.position, velocity, args.targets) : null;
+      const collision = move.type === "none" ? tankCollision : move;
+
+      if (collision) {
+        const impactSpeed = collisionImpactSpeed(velocity, collision);
+        const damage = collisionDamageForImpact(impactSpeed);
+        const healthAfter = Math.max(0, args.health - damage);
+        points.push({
+          at,
+          position: collision.position,
+          velocity: { x: 0, y: 0 },
+          damage,
+        });
+        return {
+          points,
+          collision: {
+            type: collision.type,
+            position: collision.position,
+            normal: collision.normal,
+            impactSpeed,
+            damage,
+            healthAfter,
+            ...(collision.type === "tank" ? {
+              otherTankId: collision.otherTankId,
+              damageToOther: collision.damageToOther,
+              otherHealthAfter: collision.otherHealthAfter,
+            } : {}),
+          },
+        };
+      }
+
+      position = move.position;
+      points.push({
+        at,
+        position,
+        velocity,
       });
     }
 
-    points.push({
-      at,
-      position,
-      velocity: vectorFromBearing(sampleBearingAt(bearingTimelines, at, fallbackBearing), signedUnitsPerMs * stepMs),
-    });
+    points[points.length - 1] = {
+      ...points[points.length - 1],
+      velocity: { x: 0, y: 0 },
+    };
+    return { points, collision: null };
   }
 
-  const lastAt = points[points.length - 1]?.at ?? startedAt;
-  if (lastAt < startedAt + durationMs) {
-    const bearing = sampleBearingAt(bearingTimelines, lastAt + (startedAt + durationMs - lastAt) / 2, fallbackBearing);
-    const delta = vectorFromBearing(bearing, signedUnitsPerMs * (startedAt + durationMs - lastAt));
-    position = clampTankPosition({
-      x: position.x + delta.x,
-      y: position.y + delta.y,
-    });
+  private resolveTankCollision(position: { x: number; y: number }, velocity: { x: number; y: number }, targets: any[]) {
+    const minDistance = TANK_COLLISION_RADIUS_UNITS * 2 + TANK_COLLISION_CLEARANCE_UNITS;
+    return targets
+      .map((target) => this.circleTankCollision(position, velocity, target, minDistance))
+      .filter((collision): collision is Exclude<CollisionDetails, { type: "none" } | { type: "wall" }> => Boolean(collision))
+      .sort((a, b) => b.penetration - a.penetration)[0] ?? null;
   }
 
-  points.push({
-    at: startedAt + durationMs,
-    position,
-    velocity: { x: 0, y: 0 },
-  });
-  return points;
+  private circleTankCollision(
+    position: { x: number; y: number },
+    velocity: { x: number; y: number },
+    target: any,
+    minDistance: number,
+  ) {
+    const offset = subtractVectors(position, target.position);
+    const distance = vectorLength(offset);
+    if (distance >= minDistance) {
+      return null;
+    }
+
+    const normal = normalizedVector(offset, normalizedVector(scaleVector(velocity, -1), { x: 0, y: -1 }));
+    if (dotProduct(velocity, normal) >= -0.01) {
+      return null;
+    }
+
+    const impactSpeed = Math.max(0, -dotProduct(velocity, normal));
+    const damageToOther = collisionDamageForImpact(impactSpeed);
+    return {
+      type: "tank" as const,
+      otherTankId: target._id,
+      position: clampPosition(addVectors(target.position, scaleVector(normal, minDistance)), this.board.size),
+      normal,
+      penetration: minDistance - distance,
+      damageToOther,
+      otherHealthAfter: Math.max(0, target.health - damageToOther),
+    };
+  }
 }
 
 function sampleBearingAt(timelines: any[], at: number, fallbackBearing: number) {
@@ -1234,6 +1366,20 @@ async function ensureDefaultBoard(ctx: any, now: number) {
     return existing._id;
   }
 
+  return await ctx.db.insert("boards", {
+    code: "classic",
+    name: "Classic Arena",
+    size: BOARD_SIZE,
+    walls: arenaWalls(),
+    spawnPoints: [
+      spawnPoint(0),
+      spawnPoint(1),
+    ],
+    createdAt: now,
+  });
+}
+
+function arenaWalls() {
   const walls: { x: number; y: number }[] = [];
   for (let index = 0; index < BOARD_SIZE; index += 1) {
     appendWall(walls, { x: index, y: 0 });
@@ -1241,18 +1387,7 @@ async function ensureDefaultBoard(ctx: any, now: number) {
     appendWall(walls, { x: 0, y: index });
     appendWall(walls, { x: BOARD_SIZE - 1, y: index });
   }
-
-  return await ctx.db.insert("boards", {
-    code: "classic",
-    name: "Classic Arena",
-    size: BOARD_SIZE,
-    walls,
-    spawnPoints: [
-      spawnPoint(0),
-      spawnPoint(1),
-    ],
-    createdAt: now,
-  });
+  return walls;
 }
 
 async function requireCommanderProfile(ctx: any, commanderId: any) {

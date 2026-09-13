@@ -58,7 +58,7 @@ export type AiConsoleMetaCommand =
     };
 
 const AI_MISSION_BUDGET_USD = 0.1;
-const AI_MISSION_MAX_STEPS = 8;
+const AI_MISSION_MAX_STEPS = 5;
 
 export class AiCommandConsolePresenter {
   formatPrompt(tank: Tank | null) {

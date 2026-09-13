@@ -3,16 +3,20 @@ import {
   DEFAULT_FIRE_ANGLE_DEGREES,
   DEFAULT_FIRE_POWER,
   FRAME_RATE,
+  TANK_COLLISION_CLEARANCE_UNITS,
   TANK_COLLISION_RADIUS_UNITS,
   TANK_LENGTH_UNITS,
   TANK_WIDTH_UNITS,
   UNITS_PER_SQUARE,
   angleFromDirection,
+  clamp,
   distanceBetween,
   normalizeOrderCommand,
   normalizeRoom,
+  normalizeDegrees,
   roundForStorage,
   shortestAngleDelta,
+  vectorFromBearing,
   vectorLength,
 } from "./gameCore";
 import { BattleDamageModel, ProjectilePhysics, TargetingModel } from "./battlePhysics";
@@ -23,7 +27,10 @@ export const AI_COMMANDER_LIMITS = {
 } as const;
 
 const DEFAULT_NEBIUS_BASE_URL = "https://api.tokenfactory.nebius.com/v1";
-const DEFAULT_NEBIUS_MODEL = "google/gemma-3-27b-it";
+const DEFAULT_NEBIUS_MODEL = "MiniMaxAI/MiniMax-M3";
+const DEFAULT_AI_ORBIT_RADIUS_SQUARES = 3.5;
+const DEFAULT_AI_ORBIT_STEP_SQUARES = 1;
+const AI_ORBIT_MAX_BEARING_DELTA = 55;
 
 type Vector = {
   x: number;
@@ -526,11 +533,12 @@ export class NebiusCommanderClient {
       };
     }
     if (mode === "review") {
+      const achieved = this.interpreter.readAchieved(assistantText);
       return {
         commandLine: "",
         commands: [],
-        tasks: this.interpreter.readTaskList(assistantText),
-        achieved: this.interpreter.readAchieved(assistantText),
+        tasks: achieved ? [] : new CommanderMissionTaskPlanner().guard(snapshot, this.interpreter.readTaskList(assistantText)),
+        achieved,
         stopReason: this.interpreter.readStopReason(assistantText),
       };
     }
@@ -557,7 +565,10 @@ export class NebiusCommanderClient {
     };
     return {
       ...planned,
-      intentPlan: new CommanderIntentPlanner().plan(planned),
+      intentPlan: new CommanderIntentPlanner().mergeParentConstraints(
+        new CommanderIntentPlanner().plan(planned),
+        snapshot.intentPlan,
+      ),
     };
   }
 
@@ -584,101 +595,220 @@ class LocalPreviewReply {
   }
 }
 
+class CommanderStrategyDirectives {
+  constructor(private readonly snapshot: AssistSnapshot) {}
+
+  orbitRadiusSquares() {
+    return this.numberNear(/\b(?:orbit|circle|flank|around|distance|radius)\b.{0,40}\b(\d+(?:\.\d+)?)\s*(?:sq|square|squares)\b/i, 2.5, 5, DEFAULT_AI_ORBIT_RADIUS_SQUARES);
+  }
+
+  orbitStepSquares() {
+    return this.numberNear(/\b(?:step|move)\b.{0,24}\b(\d+(?:\.\d+)?)\s*(?:sq|square|squares)\b/i, 0, 2, DEFAULT_AI_ORBIT_STEP_SQUARES);
+  }
+
+  attackCommand(fallbackBearing: number) {
+    const solution = this.preferredFireSolution();
+    if (solution) {
+      return solution.command;
+    }
+    return `aim ${fallbackBearing}; elev ${this.preferredElevation(45)}; pow ${this.preferredPower(80)}; fire`;
+  }
+
+  aimCommand(fallbackBearing: number) {
+    const solution = this.preferredFireSolution();
+    if (solution) {
+      return `aim ${solution.aim}; elev ${solution.elevation}; pow ${solution.power}`;
+    }
+    return `aim ${fallbackBearing}; elev ${this.preferredElevation(45)}; pow ${this.preferredPower(80)}`;
+  }
+
+  private preferredFireSolution() {
+    const solutions = this.snapshot.derived?.fireSolutions ?? [];
+    const elevation = this.optionalNumberNear(/\b(?:prefer|preferred|use|favor|favour)\b.{0,24}\b(?:elev|elevation|angle)\b.{0,12}\b(\d+(?:\.\d+)?)\b/i);
+    const power = this.optionalNumberNear(/\b(?:prefer|preferred|use|favor|favour)\b.{0,24}\b(?:pow|power)\b.{0,12}\b(\d+(?:\.\d+)?)\b/i);
+    return [...solutions].sort((left, right) => {
+      const leftPenalty = this.firePreferencePenalty(left, elevation, power);
+      const rightPenalty = this.firePreferencePenalty(right, elevation, power);
+      return leftPenalty - rightPenalty || left.missDistance - right.missDistance;
+    })[0] ?? null;
+  }
+
+  private firePreferencePenalty(solution: { elevation: number; power: number; missDistance: number }, elevation: number | null, power: number | null) {
+    return solution.missDistance +
+      (elevation === null ? 0 : Math.abs(solution.elevation - elevation) * 90) +
+      (power === null ? 0 : Math.abs(solution.power - power) * 18);
+  }
+
+  private preferredElevation(fallback: number) {
+    return this.numberNear(/\b(?:prefer|preferred|use|favor|favour)\b.{0,24}\b(?:elev|elevation|angle)\b.{0,12}\b(\d+(?:\.\d+)?)\b/i, 10, 60, fallback);
+  }
+
+  private preferredPower(fallback: number) {
+    return this.numberNear(/\b(?:prefer|preferred|use|favor|favour)\b.{0,24}\b(?:pow|power)\b.{0,12}\b(\d+(?:\.\d+)?)\b/i, 10, 100, fallback);
+  }
+
+  private numberNear(pattern: RegExp, min: number, max: number, fallback: number) {
+    const value = this.optionalNumberNear(pattern);
+    return value === null ? fallback : clamp(value, min, max);
+  }
+
+  private optionalNumberNear(pattern: RegExp) {
+    const match = this.text().match(pattern);
+    const value = match ? Number(match[1]) : Number.NaN;
+    return Number.isFinite(value) ? value : null;
+  }
+
+  private text() {
+    return [
+      this.snapshot.strategy?.content ?? "",
+      this.snapshot.intent ?? "",
+    ].join("\n");
+  }
+}
+
 class CommanderIntentPlanner {
   plan(snapshot: AssistSnapshot): IntentPlan {
     const intent = String(snapshot.intent ?? "").toLowerCase();
     const classifier = new CommanderIntentClassifier(intent);
+    const directives = new CommanderStrategyDirectives(snapshot);
     const bearingToOpponent = snapshot.derived?.bearingToOpponent ?? snapshot.me?.aim ?? 0;
     const leftFlankBearing = snapshot.derived?.leftFlankBearing ?? bearingToOpponent;
     const rightFlankBearing = snapshot.derived?.rightFlankBearing ?? bearingToOpponent;
-    const attackCommand = snapshot.derived?.fireSolutions?.[0]?.command ?? `aim ${bearingToOpponent}; elev 45; pow 80; fire`;
+    const attackCommand = directives.attackCommand(bearingToOpponent);
+    const aimCommand = directives.aimCommand(bearingToOpponent);
 
     if (classifier.wantsReverse) {
       return this.intentPlan("reverse", ["move"], ["fire"], `move -2`, "Move backward; do not fire for reverse intent.");
     }
 
     if (classifier.wantsAway && classifier.wantsAttack) {
+      const evade = this.safeMovement(snapshot, this.escapeBearing(snapshot), 2);
       return this.intentPlan(
         "evade-attack",
         ["bear", "move", "aim", "elev", "pow", "fire"],
         [],
-        `bear ${this.escapeBearing(snapshot)}; move 2; ${attackCommand}`,
+        `bear ${evade.bearing}; move ${evade.squares}; ${attackCommand}`,
         "Move away from opponent, then fire using the best fire-control solution.",
       );
     }
 
     if (classifier.wantsAway) {
+      const evade = this.safeMovement(snapshot, this.escapeBearing(snapshot), 2);
       return this.intentPlan(
         "evade",
         ["bear", "move"],
         ["fire"],
-        `bear ${this.escapeBearing(snapshot)}; move 2; aim ${bearingToOpponent}`,
+        `bear ${evade.bearing}; move ${evade.squares}; aim ${bearingToOpponent}`,
         "Move away from opponent while keeping turret aimed at them; do not fire.",
       );
     }
 
     const navigation = new CommanderNavigationIntent(snapshot).read(classifier);
     if (navigation && classifier.wantsAttack) {
+      const safeNavigation = this.safeMovement(snapshot, navigation.bearing, navigation.squares);
       return this.intentPlan(
         "navigate-attack",
         ["bear", "move", "aim", "elev", "pow", "fire"],
         [],
-        `bear ${navigation.bearing}; move ${navigation.squares}; ${attackCommand}`,
+        `bear ${safeNavigation.bearing}; move ${safeNavigation.squares}; ${attackCommand}`,
         `${navigation.reason}, then fire using the best fire-control solution.`,
       );
     }
 
+    if (navigation && classifier.wantsAim) {
+      const safeNavigation = this.safeMovement(snapshot, navigation.bearing, navigation.squares);
+      return this.intentPlan(
+        "navigate-aim",
+        ["bear", "move", "aim"],
+        ["fire"],
+        `bear ${safeNavigation.bearing}; move ${safeNavigation.squares}; ${aimCommand}`,
+        `${navigation.reason}, then aim at the predicted target; do not fire.`,
+      );
+    }
+
     if (navigation) {
+      const safeNavigation = this.safeMovement(snapshot, navigation.bearing, navigation.squares);
       return this.intentPlan(
         "navigate",
         ["bear", "move"],
         ["fire"],
-        `bear ${navigation.bearing}; move ${navigation.squares}`,
+        `bear ${safeNavigation.bearing}; move ${safeNavigation.squares}`,
         `${navigation.reason}; do not fire.`,
       );
     }
 
     if (classifier.wantsFlank && classifier.wantsAttack) {
-      const flankBearing = classifier.wantsFlankRight ? rightFlankBearing : leftFlankBearing;
+      const flank = this.safeFlankMovement(snapshot, classifier.wantsFlankRight ? rightFlankBearing : leftFlankBearing, classifier.wantsFlankRight ? leftFlankBearing : rightFlankBearing);
       const category = classifier.wantsFlankRight ? "flank-right-attack" : "flank-left-attack";
       return this.intentPlan(
         category,
         ["bear", "move", "aim", "elev", "pow", "fire"],
         [],
-        `bear ${flankBearing}; move 2; ${attackCommand}`,
+        `bear ${flank.bearing}; move ${flank.squares}; ${attackCommand}`,
         "Move around opponent on a tangent, then fire using the best fire-control solution.",
       );
     }
 
     if (classifier.wantsFlankRight) {
-      return this.intentPlan("flank-right", ["bear", "move"], [], `bear ${rightFlankBearing}; move 2; aim ${bearingToOpponent}`, "Move tangent to opponent on the right side.");
+      const flank = this.safeFlankMovement(snapshot, rightFlankBearing, leftFlankBearing);
+      return this.intentPlan("flank-right", ["bear", "move"], ["fire"], `bear ${flank.bearing}; move ${flank.squares}; aim ${bearingToOpponent}`, "Move tangent to opponent on the right side; do not fire.");
     }
 
     if (classifier.wantsFlank) {
-      return this.intentPlan("flank-left", ["bear", "move"], [], `bear ${leftFlankBearing}; move 2; aim ${bearingToOpponent}`, "Move tangent to opponent on the left side.");
+      const flank = this.safeFlankMovement(snapshot, leftFlankBearing, rightFlankBearing);
+      return this.intentPlan("flank-left", ["bear", "move"], ["fire"], `bear ${flank.bearing}; move ${flank.squares}; aim ${bearingToOpponent}`, "Move tangent to opponent on the left side; do not fire.");
     }
 
     if (classifier.wantsMovement && classifier.wantsAttack) {
+      const approach = this.safeMovement(snapshot, bearingToOpponent, this.approachSquares(snapshot));
       return this.intentPlan(
         "advance-attack",
         ["bear", "move", "aim", "elev", "pow", "fire"],
         [],
-        `bear ${bearingToOpponent}; move ${this.safeApproachSquares(snapshot)}; ${attackCommand}`,
+        `bear ${approach.bearing}; move ${approach.squares}; ${attackCommand}`,
         "Move toward opponent, aim with best fire-control solution, then fire.",
       );
     }
 
     if (classifier.wantsMovement) {
+      const approach = this.safeMovement(snapshot, bearingToOpponent, this.approachSquares(snapshot));
       return this.intentPlan(
         "approach",
         ["bear", "move"],
         ["fire"],
-        `bear ${bearingToOpponent}; move ${this.safeApproachSquares(snapshot)}`,
+        `bear ${approach.bearing}; move ${approach.squares}`,
         "Move toward opponent using current bearingToOpponent; do not fire for movement-only intent.",
       );
     }
 
+    if (classifier.wantsAim && !classifier.wantsAttack) {
+      return this.intentPlan(
+        "aim",
+        ["aim"],
+        ["fire"],
+        aimCommand,
+        "Aim at the predicted target and set elevation/power if useful; do not fire.",
+      );
+    }
+
     return this.intentPlan("attack", ["aim", "elev", "pow", "fire"], [], attackCommand, "Attack using the best precomputed fire solution.");
+  }
+
+  mergeParentConstraints(plan: IntentPlan, parentPlan?: IntentPlan): IntentPlan {
+    if (!parentPlan) {
+      return plan;
+    }
+
+    const forbidden = Array.from(new Set([...plan.forbiddenCommandTypes, ...parentPlan.forbiddenCommandTypes]));
+    if (forbidden.length === plan.forbiddenCommandTypes.length) {
+      return plan;
+    }
+
+    return {
+      ...plan,
+      forbiddenCommandTypes: forbidden,
+      recommendedCommands: new CommanderCommandPolicy().withoutForbidden(plan.recommendedCommands, forbidden),
+    };
   }
 
   private intentPlan(
@@ -697,7 +827,7 @@ class CommanderIntentPlanner {
     };
   }
 
-  private safeApproachSquares(snapshot: AssistSnapshot) {
+  private approachSquares(snapshot: AssistSnapshot) {
     const distance = snapshot.derived?.distanceSquares ?? 5;
     return Math.max(1, Math.min(3, Math.floor(distance - 2)));
   }
@@ -705,6 +835,179 @@ class CommanderIntentPlanner {
   private escapeBearing(snapshot: AssistSnapshot) {
     const bearing = snapshot.derived?.bearingToOpponent ?? 0;
     return roundForStorage((bearing + 180) % 360);
+  }
+
+  private safeFlankMovement(snapshot: AssistSnapshot, preferredBearing: number, alternateBearing: number) {
+    const orbit = new CommanderOrbitPlanner(snapshot).movement(preferredBearing, alternateBearing);
+    if (orbit.squares >= 1) {
+      return orbit;
+    }
+
+    const preferred = this.safeMovement(snapshot, preferredBearing, DEFAULT_AI_ORBIT_STEP_SQUARES);
+    if (preferred.squares >= 1) {
+      return preferred;
+    }
+
+    const alternate = this.safeMovement(snapshot, alternateBearing, DEFAULT_AI_ORBIT_STEP_SQUARES);
+    if (alternate.squares >= 1) {
+      return alternate;
+    }
+
+    return this.safeMovement(snapshot, new CommanderMovementSafety(snapshot).openSpaceBearing(), DEFAULT_AI_ORBIT_STEP_SQUARES);
+  }
+
+  private safeMovement(snapshot: AssistSnapshot, bearing: number, requestedSquares: number) {
+    return new CommanderMovementSafety(snapshot).movement(bearing, requestedSquares);
+  }
+
+  private aimCommand(snapshot: AssistSnapshot, fallbackBearing: number) {
+    const best = snapshot.derived?.fireSolutions?.[0];
+    if (best) {
+      return `aim ${best.aim}; elev ${best.elevation}; pow ${best.power}`;
+    }
+    return `aim ${fallbackBearing}; elev 45; pow 80`;
+  }
+}
+
+class CommanderMovementSafety {
+  constructor(private readonly snapshot: AssistSnapshot) {}
+
+  movement(bearing: number, requestedSquares: number) {
+    const maxSquares = this.maxSafeMoveSquares(bearing);
+    return {
+      bearing: roundForStorage(normalizeDegrees(bearing)),
+      squares: Math.max(0, Math.min(requestedSquares, maxSquares)),
+    };
+  }
+
+  openSpaceBearing() {
+    const position = this.snapshot.me?.position;
+    if (!position) {
+      return this.snapshot.derived?.bearingToOpponent ?? 0;
+    }
+
+    const min = UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS;
+    const max = (BOARD_SIZE - 1) * UNITS_PER_SQUARE - TANK_COLLISION_RADIUS_UNITS;
+    const x = position.x < min + UNITS_PER_SQUARE ? 1 : position.x > max - UNITS_PER_SQUARE ? -1 : 0;
+    const y = position.y < min + UNITS_PER_SQUARE ? 1 : position.y > max - UNITS_PER_SQUARE ? -1 : 0;
+    if (x === 0 && y === 0) {
+      return this.snapshot.derived?.bearingToOpponent ?? 0;
+    }
+    return roundForStorage((((Math.atan2(y, x) * 180) / Math.PI) + 90 + 360) % 360);
+  }
+
+  private maxSafeMoveSquares(bearing: number) {
+    const position = this.snapshot.me?.position;
+    if (!position) {
+      return 1;
+    }
+
+    const direction = vectorFromBearing(bearing, 1);
+    const min = UNITS_PER_SQUARE + TANK_COLLISION_RADIUS_UNITS;
+    const max = (BOARD_SIZE - 1) * UNITS_PER_SQUARE - TANK_COLLISION_RADIUS_UNITS;
+    const distances = [];
+    if (direction.x < -0.001) {
+      distances.push((position.x - min) / (-direction.x));
+    }
+    if (direction.x > 0.001) {
+      distances.push((max - position.x) / direction.x);
+    }
+    if (direction.y < -0.001) {
+      distances.push((position.y - min) / (-direction.y));
+    }
+    if (direction.y > 0.001) {
+      distances.push((max - position.y) / direction.y);
+    }
+
+    const wallLimit = Math.max(0, Math.min(...distances) / UNITS_PER_SQUARE - 0.2);
+    const tankLimit = this.maxSafeTankDistanceSquares(bearing);
+    return Math.floor(Math.max(0, Math.min(wallLimit, tankLimit, 3)));
+  }
+
+  private maxSafeTankDistanceSquares(bearing: number) {
+    if (!this.snapshot.me?.position || !this.snapshot.opponent?.position) {
+      return 3;
+    }
+
+    const direction = vectorFromBearing(bearing, 1);
+    const relative = {
+      x: this.snapshot.opponent.position.x - this.snapshot.me.position.x,
+      y: this.snapshot.opponent.position.y - this.snapshot.me.position.y,
+    };
+    const projection = relative.x * direction.x + relative.y * direction.y;
+    if (projection <= 0) {
+      return 3;
+    }
+
+    const perpendicularDistance = Math.hypot(relative.x - direction.x * projection, relative.y - direction.y * projection);
+    const minDistance = TANK_COLLISION_RADIUS_UNITS * 2 + TANK_COLLISION_CLEARANCE_UNITS;
+    if (perpendicularDistance >= minDistance) {
+      return 3;
+    }
+
+    const alongCollision = projection - Math.sqrt(minDistance * minDistance - perpendicularDistance * perpendicularDistance);
+    return Math.max(0, alongCollision / UNITS_PER_SQUARE - 0.25);
+  }
+}
+
+class CommanderOrbitPlanner {
+  constructor(private readonly snapshot: AssistSnapshot) {}
+
+  movement(preferredTangent: number, alternateTangent: number) {
+    const preferred = this.safeOrbitMovement(preferredTangent);
+    const alternate = this.safeOrbitMovement(alternateTangent);
+    const movement = this.betterMovement(preferred, alternate);
+    return {
+      bearing: movement.bearing,
+      squares: movement.squares,
+    };
+  }
+
+  private safeOrbitMovement(tangentBearing: number) {
+    const orbitBearing = this.orbitBearing(tangentBearing);
+    return new CommanderMovementSafety(this.snapshot).movement(orbitBearing, new CommanderStrategyDirectives(this.snapshot).orbitStepSquares());
+  }
+
+  private orbitBearing(tangentBearing: number) {
+    const bearingToOpponent = this.snapshot.derived?.bearingToOpponent ?? this.snapshot.me?.bearing ?? tangentBearing;
+    const distance = this.snapshot.derived?.distanceSquares ?? DEFAULT_AI_ORBIT_RADIUS_SQUARES;
+    const radiusError = new CommanderStrategyDirectives(this.snapshot).orbitRadiusSquares() - distance;
+    const radialWeight = Math.min(0.7, Math.abs(radiusError) / 1.5);
+    const radialBearing = radiusError > 0 ? normalizeDegrees(bearingToOpponent + 180) : bearingToOpponent;
+    const tangent = vectorFromBearing(tangentBearing, 1);
+    const radial = vectorFromBearing(radialBearing, radialWeight);
+    const targetBearing = this.bearingFromVector({
+      x: tangent.x + radial.x,
+      y: tangent.y + radial.y,
+    }, tangentBearing);
+    return this.smoothBearing(targetBearing);
+  }
+
+  private smoothBearing(targetBearing: number) {
+    const currentBearing = this.snapshot.me?.bearing ?? targetBearing;
+    const delta = shortestAngleDelta(currentBearing, targetBearing);
+    return roundForStorage(normalizeDegrees(currentBearing + clamp(delta, -AI_ORBIT_MAX_BEARING_DELTA, AI_ORBIT_MAX_BEARING_DELTA)));
+  }
+
+  private betterMovement(
+    preferred: { bearing: number; squares: number },
+    alternate: { bearing: number; squares: number },
+  ) {
+    if (preferred.squares !== alternate.squares) {
+      return preferred.squares > alternate.squares ? preferred : alternate;
+    }
+
+    const currentBearing = this.snapshot.me?.bearing ?? preferred.bearing;
+    return Math.abs(shortestAngleDelta(currentBearing, preferred.bearing)) <= Math.abs(shortestAngleDelta(currentBearing, alternate.bearing))
+      ? preferred
+      : alternate;
+  }
+
+  private bearingFromVector(vector: Vector, fallbackBearing: number) {
+    if (vectorLength(vector) <= 0.0001) {
+      return fallbackBearing;
+    }
+    return roundForStorage((((Math.atan2(vector.y, vector.x) * 180) / Math.PI) + 90 + 360) % 360);
   }
 }
 
@@ -790,6 +1093,9 @@ class CommanderMissionTaskPlanner {
     if (plan?.category === "navigate") {
       return [plan.reason];
     }
+    if (plan?.category === "navigate-aim" || plan?.category === "aim") {
+      return [plan.reason];
+    }
     if (plan?.category === "attack") {
       return ["aim and fire at the predicted target"];
     }
@@ -806,7 +1112,15 @@ class CommanderMissionTaskPlanner {
 
   private requiresDeterministicPlan(snapshot: AssistSnapshot) {
     const classifier = new CommanderIntentClassifier(snapshot.intent);
-    return classifier.wantsKeepShooting || classifier.wantsHalfCircleAttack || classifier.wantsCenter || classifier.compassBearing !== null;
+    return (
+      classifier.wantsKeepShooting ||
+      classifier.wantsHalfCircleAttack ||
+      classifier.wantsFlank ||
+      classifier.wantsAway ||
+      classifier.wantsCenter ||
+      classifier.compassBearing !== null ||
+      (classifier.wantsAim && !classifier.wantsAttack)
+    );
   }
 }
 
@@ -838,7 +1152,11 @@ class CommanderIntentClassifier {
   }
 
   get wantsAttack() {
-    return !this.suppressesAttack && /\b(aim|attack|fire|shoot|hit|target|blast|engage)\b/.test(this.intent);
+    return !this.suppressesAttack && /\b(attack|fire|firing|shoot|shooting|hit|blast|engage|kill|destroy)\b/.test(this.intent);
+  }
+
+  get wantsAim() {
+    return /\b(aim|aiming|target|targeting|track|tracking|point|lock)\b/.test(this.intent);
   }
 
   get wantsKeepShooting() {
@@ -918,7 +1236,8 @@ class CommanderIntentGuard {
       return { commands };
     }
 
-    const actions = commands.map((command) => command.trim().split(/\s+/)[0]?.toLowerCase());
+    const policy = new CommanderCommandPolicy();
+    const actions = policy.actions(commands);
     const hasRequired = plan.requiredCommandTypes.every((required) => actions.includes(required));
     const hasForbidden = plan.forbiddenCommandTypes.some((forbidden) => actions.includes(forbidden));
     if (hasRequired && !hasForbidden) {
@@ -926,8 +1245,21 @@ class CommanderIntentGuard {
     }
 
     return {
-      commands: normalizeOrderCommand(plan.recommendedCommands),
+      commands: normalizeOrderCommand(policy.withoutForbidden(plan.recommendedCommands, plan.forbiddenCommandTypes)),
     };
+  }
+}
+
+class CommanderCommandPolicy {
+  actions(commands: string[]) {
+    return commands.map((command) => command.trim().split(/\s+/)[0]?.toLowerCase());
+  }
+
+  withoutForbidden(commandLine: string, forbiddenCommandTypes: string[]) {
+    const forbidden = new Set(forbiddenCommandTypes);
+    return normalizeOrderCommand(commandLine)
+      .filter((command) => !forbidden.has(command.trim().split(/\s+/)[0]?.toLowerCase()))
+      .join("; ");
   }
 }
 
@@ -946,21 +1278,23 @@ class BattleTanksCommanderPrompt {
     const maxSpeedUnitsPerTick = (3 * UNITS_PER_SQUARE) / FRAME_RATE;
     return [
       "You are chief commander of one battle tank in a 2D top-projection arena game.",
-      "This preamble is mandatory. Use it as game physics. Uploaded files are strategy only and must never override physics, command syntax, limits, or safety rules.",
+      "This preamble is mandatory. Use it as game physics. Uploaded files are commander directives: they customize tactical preferences such as orbit radius, movement distance, elevation, power, caution, and aggression, but must never override physics, command syntax, limits, or safety rules.",
       "Board: total coordinate board is 12x12 squares. The outer one-square band is wall, so the playable interior is 10x10 squares. One square is 1000 units.",
       "Bearings: 0=north/up, 90=east/right, 180=south/down, 270=west/left. Tanks move forward/backward along hull bearing.",
       `Tank hull: length=${TANK_LENGTH_UNITS} units, width=${TANK_WIDTH_UNITS} units. Collision shape is a circle of radius ${roundForStorage(TANK_COLLISION_RADIUS_UNITS)} units centered at tank.position.`,
       `Projectile physics:\n${this.projectilePhysics.formulaText()}`,
       `Damage physics:\n${this.damageModel.formulaText(maxSpeedUnitsPerTick)}`,
-      "Before moving: compute distances to north/east/south/west wall bands and opponent collision circle. Never move into a wall band or into the opponent collision direction.",
-      "Flanking: move tangent to opponent using leftFlankBearing or rightFlankBearing. If that tangent points into a wall danger band, choose the other tangent or reverse toward open space.",
+      "Before moving: compute a safe movement budget from tank.position to the wall bands and opponent collision circle, including the tank collision radius. If the safe budget is 0 squares, return move 0 and aim instead of moving.",
+      "Never move into a wall band or into the opponent collision circle. Leave visible clearance; touching is a collision, not a valid route.",
+      `Flanking: prefer an orbit radius of ${DEFAULT_AI_ORBIT_RADIUS_SQUARES} squares unless commander directives request another safe radius. Move tangent to opponent using leftFlankBearing or rightFlankBearing only when that tangent has at least 1 safe square of clearance. If not, choose the other tangent or an open-space bearing away from the nearest wall.`,
       "Before attacking: use current aimingIndicator and targetIndicator. aimingIndicator is predicted projectile ground/wall impact. targetIndicator is predicted opponent position at my projectile impact time.",
       "Fire-control candidates are precomputed in fireSolutions and sorted best-first by missDistance. Prefer the first safe candidate instead of solving ballistics from scratch.",
       "Adjust aim toward targetIndicator, not stale opponent position. Adjust elevation and power so aimingIndicator converges on targetIndicator. If aimImpact is short, increase power or lower elevation. If long, reduce power or raise elevation.",
-      "You must follow intentPlan. If intentPlan.category is approach, reverse, or evade, do not fire. If intentPlan gives recommendedCommands and they are safe, return them exactly.",
+      "You must follow intentPlan. If intentPlan.forbiddenCommandTypes includes fire, do not fire. If intentPlan gives recommendedCommands and they are safe, return them exactly.",
       "Use randomness only among equally safe choices: left/right flank, aim lead +/-3 degrees, power +/-5. Never randomize into collision or wall danger.",
       "Return JSON only: {\"commands\":\"...\"}.",
       "Legal commands: bear <0-360>; move <-10..10>; aim <0-360>; elev <10-60>; pow <10-100>; fire; ret. Use full command names, not abbreviations.",
+      "Semantic rule: aim, aiming, target, tracking, lock, and point mean orient the cannon only. They do not imply fire. Only attack, fire, shoot, hit, blast, engage, kill, or destroy imply firing.",
       "Prefer short plans of 2 to 5 commands. If unsure, aim, set elevation/power, and fire. If too close or near wall, move safely first.",
       "Do not explain.",
     ].join("\n");
@@ -998,6 +1332,8 @@ class BattleTanksCommanderPrompt {
         "Return JSON only with one field tasks.",
         "tasks must be an array of 1 to 6 short tactical tasks.",
         "Each task must be achievable by one legal command chain.",
+        "Commander directives should adjust the task list: preferred orbit radius, distance, elevation, power, aggression, and caution all matter.",
+        "Do not create tasks that use any command type listed in intentPlan.forbiddenCommandTypes.",
         "Example: {\"tasks\":[\"turn toward opponent and advance safely\",\"aim and fire at predicted target\"]}",
       ].join(" ");
     }
@@ -1006,6 +1342,7 @@ class BattleTanksCommanderPrompt {
         "Return JSON only with achieved, tasks, and stopReason.",
         "If the playerIntent appears achieved, set achieved=true and tasks=[].",
         "If more work is needed, set achieved=false and tasks to 1 to 4 correction tasks.",
+        "Correction tasks must still obey intentPlan.forbiddenCommandTypes.",
         "Example: {\"achieved\":false,\"tasks\":[\"adjust aim and fire again\"],\"stopReason\":\"first shot missed short\"}",
       ].join(" ");
     }
@@ -1013,6 +1350,8 @@ class BattleTanksCommanderPrompt {
       return [
         "Return JSON only with one field commands.",
         "commands must execute only aiRequest.task, not the entire playerIntent unless they are the same.",
+        "commands must include every command type from intentPlan.requiredCommandTypes and must not include any command type from intentPlan.forbiddenCommandTypes.",
+        "Commander directives should adjust command parameters such as move distance, orbit radius, elevation, and power, while staying inside physics limits.",
         "Example: {\"commands\":\"bear 135; move 2\"}",
       ].join(" ");
     }
