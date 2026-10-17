@@ -9,7 +9,8 @@
     "dev:vite": "vite --host 127.0.0.1",
     "dev:convex": "convex dev",
     "deploy": "npx @convex-dev/static-hosting deploy",
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && vite build --ssr server/standalone-entry.js --outDir dist/server --emptyOutDir false",
+    "build-wasmer": "npm run build && cp wasmer.toml app.yaml ./dist",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
@@ -29,6 +30,7 @@
     "@types/react-dom": "^18.0.0",
     "@vitejs/plugin-react": "^4.2.1",
     "typescript": "~5.0.3",
-    "vite": "^6.4.3"
+    "vite": "^6.4.3",
+    "vite-plugin-standalone": "^2.0.0-alpha.5"
   }
 }

@@ -1,0 +1,18 @@
+[package]
+name = "sadhbh-c0d3/battle-tanks"
+version = "0.1.0"
+description = "Battle Tanks"
+
+[dependencies]
+"sadhbh-c0d3/edgejs-quickjs" = "^0.2.0"
+
+[fs]
+"/dist" = "./"
+
+[[command]]
+name = "run"
+module = "sadhbh-c0d3/edgejs-quickjs:edge"
+runner = "https://webc.org/runner/wasi"
+
+[command.annotations.wasi]
+main-args = ["/dist/server/standalone-entry.js"]
